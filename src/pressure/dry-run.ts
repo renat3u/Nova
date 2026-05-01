@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { computeAllPressures, createPressureHistory } from './aggregate';
 import { conversationIdForChannel } from '../world/constants';

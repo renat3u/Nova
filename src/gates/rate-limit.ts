@@ -115,6 +115,21 @@ export class RateLimitState {
     this.consecutiveSendFailures += 1;
   }
 
+  /** Check whether the failure backoff limit has been reached. */
+  hasFailureBackoff(config: { consecutiveSendFailureLimit: number }): boolean {
+    return this.consecutiveSendFailures >= config.consecutiveSendFailureLimit;
+  }
+
+  /** Get the current consecutive send failure count (for logging / trace). */
+  get failureCount(): number {
+    return this.consecutiveSendFailures;
+  }
+
+  /** Reset the failure counter (e.g. after a successful send). */
+  resetFailureCount(): void {
+    this.consecutiveSendFailures = 0;
+  }
+
   clearOld(nowMs: number, floodWindowMs: number): void {
     this.pruneActions(nowMs);
     this.pruneMessages(nowMs, floodWindowMs);

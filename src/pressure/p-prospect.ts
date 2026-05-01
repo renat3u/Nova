@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { standardSigmoid } from '../utils/math';
 import type { WorldModel } from '../world/model';

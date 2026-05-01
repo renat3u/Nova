@@ -1,0 +1,16 @@
+import './llm/prompts.test.js';
+import './llm/proactive-prompt.test.js';
+import './llm/response-schema.test.js';
+import './llm/state-writeback.test.js';
+import './pressure/pressure-alignment.test.js';
+import './voices/voice-iaus.test.js';
+import './world/relationship-vector.test.js';
+import './world/threads.test.js';
+import './world/repository.test.js';
+import './engine/iaus-scorer.test.js';
+import './engine/desire.test.js';
+import './gates/gate.test.js';
+import './act/action-loop.test.js';
+import './memory/memory.test.js';
+import './act/responder.test.js';
+import './integration.test.js';

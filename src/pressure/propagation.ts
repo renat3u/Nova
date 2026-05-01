@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { PROPAGATION_WEIGHT } from '../world/constants';
 import type { WorldModel } from '../world/model';

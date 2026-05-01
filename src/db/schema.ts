@@ -56,12 +56,64 @@ CREATE TABLE IF NOT EXISTS threads (
   deadline_ms INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS thread_beats (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  channel_id TEXT,
+  message_id TEXT,
+  summary TEXT NOT NULL,
+  beat_type TEXT NOT NULL DEFAULT 'ambient',
+  operation TEXT NOT NULL DEFAULT 'advance_topic',
+  weight REAL NOT NULL DEFAULT 1,
+  created_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_profiles (
+  group_id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  group_name TEXT,
+  member_count INTEGER NOT NULL DEFAULT 0,
+  nova_role_in_group TEXT NOT NULL DEFAULT 'member',
+  group_risk_level TEXT NOT NULL DEFAULT 'normal',
+  last_activity_ms INTEGER NOT NULL DEFAULT 0,
+  last_incoming_ms INTEGER NOT NULL DEFAULT 0,
+  attrs_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS engagements (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  contact_id TEXT,
+  kind TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  last_event_ms INTEGER NOT NULL DEFAULT 0,
+  attrs_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS desire_tick_plans (
+  id TEXT PRIMARY KEY,
+  plan_type TEXT NOT NULL,
+  channel_id TEXT,
+  contact_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  desire_score REAL NOT NULL DEFAULT 0,
+  due_ms INTEGER,
+  attrs_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL,
   state TEXT NOT NULL,
   turn_state TEXT NOT NULL,
   last_activity_ms INTEGER NOT NULL,
+  closing_since_ms INTEGER,
   attrs_json TEXT NOT NULL
 );
 
@@ -136,13 +188,54 @@ CREATE TABLE IF NOT EXISTS working_memory (
   source_event_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS nova_tick_traces (
+  id TEXT PRIMARY KEY,
+  tick INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  gate_verdict TEXT NOT NULL,
+  silence_reason TEXT,
+  trace_json TEXT NOT NULL,
+  created_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nova_action_traces (
+  id TEXT PRIMARY KEY,
+  tick INTEGER NOT NULL,
+  action_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  trace_json TEXT NOT NULL,
+  created_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nova_deliberation_traces (
+  id TEXT PRIMARY KEY,
+  tick INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  action_summary TEXT,
+  silence_summary TEXT,
+  trace_json TEXT NOT NULL,
+  created_ms INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp ON messages(channel_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_timestamp ON messages(sender_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_facts_subject_tracked ON facts(subject_id, tracked);
 CREATE INDEX IF NOT EXISTS idx_threads_channel_status ON threads(channel_id, status);
+CREATE INDEX IF NOT EXISTS idx_thread_beats_thread_created_ms ON thread_beats(thread_id, created_ms);
+CREATE INDEX IF NOT EXISTS idx_group_profiles_channel ON group_profiles(channel_id);
+CREATE INDEX IF NOT EXISTS idx_engagements_channel_kind ON engagements(channel_id, kind);
+CREATE INDEX IF NOT EXISTS idx_desire_tick_plans_status_due ON desire_tick_plans(status, due_ms);
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel_id);
 CREATE INDEX IF NOT EXISTS idx_pressure_snapshots_created_ms ON pressure_snapshots(created_ms);
 CREATE INDEX IF NOT EXISTS idx_silence_logs_created_ms ON silence_logs(created_ms);
 CREATE INDEX IF NOT EXISTS idx_action_logs_created_ms ON action_logs(created_ms);
 CREATE INDEX IF NOT EXISTS idx_working_memory_salience ON working_memory(salience, updated_ms);
+CREATE INDEX IF NOT EXISTS idx_nova_tick_traces_created_ms ON nova_tick_traces(created_ms);
+CREATE INDEX IF NOT EXISTS idx_nova_tick_traces_tick ON nova_tick_traces(tick, reason);
+CREATE INDEX IF NOT EXISTS idx_nova_action_traces_created_ms ON nova_action_traces(created_ms);
+CREATE INDEX IF NOT EXISTS idx_nova_action_traces_tick ON nova_action_traces(tick, action_type);
+CREATE INDEX IF NOT EXISTS idx_nova_deliberation_traces_created_ms ON nova_deliberation_traces(created_ms);
+CREATE INDEX IF NOT EXISTS idx_nova_deliberation_traces_tick ON nova_deliberation_traces(tick, reason);
 `;

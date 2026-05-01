@@ -1,12 +1,11 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { CHAT_TYPE_WEIGHTS, DUNBAR_TIER_WEIGHT, contactIdForPrivateChannel } from '../world/constants';
 import type { WorldModel } from '../world/model';
 import { effectiveUnread } from './signal-decay';
 import type { PressureResult } from './types';
 
-const GROUP_P1_CAP = 3.0;
-const PRIVATE_P1_CAP = 20.0;
+export const CHANNEL_P1_CAP = 5.0;
 
 export function p1AttentionDebt(world: WorldModel, nowMs: number): PressureResult {
   const contributions: Record<string, number> = {};
@@ -21,8 +20,8 @@ export function p1AttentionDebt(world: WorldModel, nowMs: number): PressureResul
     const relevance = attrs.activity_relevance ?? 1;
     const contactId = contactIdForPrivateChannel(channelId);
     const isBot = contactId !== null && world.has(contactId) && world.getContact(contactId).is_bot === true;
-    const cap = attrs.chat_type === 'group' ? GROUP_P1_CAP : PRIVATE_P1_CAP;
-    const contribution = Math.min(unread * tierWeight * chatWeight * relevance * (isBot ? 0.1 : 1), cap);
+    let contribution = unread * tierWeight * chatWeight * relevance * (isBot ? 0.1 : 1);
+    if (attrs.chat_type === 'group') contribution = Math.min(contribution, CHANNEL_P1_CAP);
     contributions[channelId] = contribution;
   }
 

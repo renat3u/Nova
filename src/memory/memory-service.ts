@@ -1,12 +1,21 @@
 import type { NovaMessageEvent } from '../core/types';
-import { clamp01 } from '../world/constants';
 import type { FactAttrs, FactType } from '../world/entities';
 import type { LongTermMemory } from './long-term-memory';
 import type { WorkingMemory, WorkingMemoryItem } from './working-memory';
+import {
+  DIARY_CAP_PER_TURN,
+  INJECT_LIMIT,
+  MAX_ENTRY_LENGTH,
+  SIMILARITY_THRESHOLD,
+} from './working-memory';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 类型
+// ═══════════════════════════════════════════════════════════════════════════
 
 export interface MemoryCandidateContext {
   event?: NovaMessageEvent;
-  source: 'message' | 'llm' | 'interaction';
+  source: 'message' | 'llm' | 'llm_state_update' | 'interaction' | 'engagement' | 'group_profile';
   salience?: number;
   nowMs?: number;
 }
@@ -18,7 +27,10 @@ export interface MemoryReviewResult {
   workingItem?: WorkingMemoryItem;
 }
 
-export class MemoryService {
+export interface EngagementFeedback {
+
+  private turnWriteCount = 0;
+
   constructor(
     readonly workingMemory: WorkingMemory,
     readonly longTermMemory: LongTermMemory,
@@ -32,81 +44,45 @@ export class MemoryService {
     this.workingMemory.flush();
   }
 
-  getWorkingMemory(limit?: number): WorkingMemoryItem[] {
+  resetTurnCount(): void {
+    this.turnWriteCount = 0;
+  }
+
+  getWorkingMemory(limit = INJECT_LIMIT): WorkingMemoryItem[] {
     return this.workingMemory.getTopItems(limit);
   }
 
-  getRelevantFacts(input: { text?: string; subjectId?: string; limit?: number }): FactAttrs[] {
-    return this.longTermMemory.getRelevantFacts(input);
+function jaccardSimilarity(a: string, b: string): number {
+  const sa = charBigrams(a);
+  const sb = charBigrams(b);
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let intersection = 0;
+  for (const x of sa) {
+    if (sb.has(x)) intersection++;
   }
+  const union = sa.size + sb.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
 
-  reviewMemoryCandidate(candidate: string, context: MemoryCandidateContext): MemoryReviewResult {
-    const content = candidate.trim();
-    if (content.length < 6) return { accepted: false, reason: 'too_short' };
-    if (isGreeting(content)) return { accepted: false, reason: 'ordinary_greeting' };
-    if (looksHallucinated(content)) return { accepted: false, reason: 'unverified_model_claim' };
-
-    const event = context.event;
-    const factType = inferFactType(content);
-    const salience = clamp01(context.salience ?? inferSalience(content, event));
-    const isPrivate = event?.chatType === 'private';
-    const highSalienceGroup = event?.chatType === 'group' && salience >= 0.75;
-
-    if (containsSensitivePersonalInfo(content) && event?.chatType === 'group') {
-      return { accepted: false, reason: 'sensitive_group_personal_info' };
-    }
-
-    const allowed = isPrivate
-      || factType === 'commitment'
-      || factType === 'preference'
-      || highSalienceGroup
-      || context.source === 'interaction';
-    if (!allowed) return { accepted: false, reason: 'low_confidence_context' };
-
-    const workingItem = this.workingMemory.addCandidate({
-      content,
-      salience,
-      sourceEventId: event?.id,
-      nowMs: context.nowMs,
-    }) ?? undefined;
-
-    const fact = this.longTermMemory.addFact({
-      content,
-      subjectId: event?.senderId,
-      factType,
-      importance: Math.max(0.3, salience),
-      volatility: factType === 'observation' ? 0.03 : 0.01,
-      tracked: true,
-      nowMs: context.nowMs,
-    });
-
-    return { accepted: true, reason: 'accepted', fact, workingItem };
+function charBigrams(text: string): Set<string> {
+  const chars = [...text];
+  const bg = new Set<string>();
+  for (let i = 0; i < chars.length - 1; i++) {
+    const a = chars[i];
+    const b = chars[i + 1];
+    if (a !== undefined && b !== undefined) bg.add(a + b);
   }
+  return bg;
 }
 
-function inferFactType(content: string): FactType {
-  if (/\b(喜欢|偏好|讨厌|希望|prefer|like|dislike|favorite)\b/i.test(content)) return 'preference';
-  if (/\b(承诺|答应|约定|todo|deadline|明天|下周|promise|will)\b/i.test(content)) return 'commitment';
-  if (content.length > 80) return 'summary';
-  return 'observation';
+/** 将显著内容转为简洁摘要 (不存原文) */
+function summarizeSignificantContent(text: string): string | null {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (compact.length <= MAX_ENTRY_LENGTH) return compact;
+  return compact.slice(0, MAX_ENTRY_LENGTH - 1).trimEnd() + '…';
 }
 
-function inferSalience(content: string, event: NovaMessageEvent | undefined): number {
-  let score = event?.isDirected ? 0.55 : 0.35;
-  if (/[!！?？]/.test(content)) score += 0.1;
-  if (/\b(重要|记住|别忘|必须|deadline|urgent|important)\b/i.test(content)) score += 0.25;
-  if (content.length > 60) score += 0.1;
-  return score;
-}
-
-function isGreeting(content: string): boolean {
-  return /^(你好|您好|嗨|哈喽|hello|hi|hey|早|晚安)[。.!！\s]*$/i.test(content);
-}
-
-function looksHallucinated(content: string): boolean {
-  return /^(用户可能|也许|看起来|我猜|可能是|the user may|it seems)/i.test(content);
-}
-
-function containsSensitivePersonalInfo(content: string): boolean {
-  return /(身份证|手机号|电话|住址|地址|银行卡|密码|token|api key|apikey|secret)/i.test(content);
+function truncateForFeedback(text: string, maxLen = 50): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length <= maxLen ? compact : `${compact.slice(0, maxLen - 1)}…`;
 }

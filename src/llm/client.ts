@@ -1,5 +1,5 @@
-import { buildNovaChatMessages } from './prompts';
-import { LLMGenerationError, type LLMConfig, type NovaLLMResponse, type NovaPromptInput } from './response-schema';
+import { buildNovaChatMessages, buildNovaProactiveChatMessages } from './prompts';
+import { LLMGenerationError, type LLMConfig, type NovaLLMResponse, type NovaProactivePromptInput, type NovaPromptInput } from './response-schema';
 
 interface OpenAIChatCompletionResponse {
   choices?: Array<{
@@ -11,12 +11,21 @@ interface OpenAIChatCompletionResponse {
 
 export interface LLMClient {
   generateReply(input: NovaPromptInput): Promise<NovaLLMResponse>;
+  generateProactive(input: NovaProactivePromptInput): Promise<NovaLLMResponse>;
 }
 
 export class OpenAICompatibleLLMClient implements LLMClient {
   constructor(private readonly config: LLMConfig) {}
 
   async generateReply(input: NovaPromptInput): Promise<NovaLLMResponse> {
+    return this.generate(buildNovaChatMessages(input));
+  }
+
+  async generateProactive(input: NovaProactivePromptInput): Promise<NovaLLMResponse> {
+    return this.generate(buildNovaProactiveChatMessages(input));
+  }
+
+  private async generate(messages: ReturnType<typeof buildNovaChatMessages>): Promise<NovaLLMResponse> {
     this.assertConfigured();
 
     const controller = new AbortController();
@@ -31,7 +40,7 @@ export class OpenAICompatibleLLMClient implements LLMClient {
         },
         body: JSON.stringify({
           model: this.config.model,
-          messages: buildNovaChatMessages(input),
+          messages,
           temperature: this.config.temperature,
           max_tokens: this.config.maxTokens,
           response_format: { type: 'json_object' },
@@ -82,6 +91,7 @@ export function parseNovaLLMResponse(content: string): NovaLLMResponse {
     ...(typeof parsed.memoryCandidate === 'string' ? { memoryCandidate: parsed.memoryCandidate } : {}),
     ...(typeof parsed.tone === 'string' ? { tone: parsed.tone } : {}),
     ...(typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence) ? { confidence: parsed.confidence } : {}),
+    ...(Array.isArray(parsed.stateUpdates) ? { stateUpdates: parsed.stateUpdates as NovaLLMResponse['stateUpdates'] } : {}),
   };
 }
 

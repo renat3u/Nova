@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { NapCatPluginContext } from './types';
 import { InMemoryActionLog } from '../act/action-log';
+import { queuedActionToSendTarget } from '../act/act-loop';
+import type { SendResult } from '../act/types';
 import { NovaFileLogger, type NovaLogger } from '../core/logger';
 import { NovaRuntime } from '../core/runtime';
 import { NovaScheduler } from '../core/scheduler';
@@ -9,6 +11,7 @@ import type { NovaRuntimeConfig } from '../core/types';
 import { MessageDedupe } from '../perception/dedupe';
 import { InMemoryDirectedState } from '../perception/directed';
 import { createDefaultConfig, mergePluginConfig, normalizePluginConfig } from './config';
+import { sendText } from './actions/send-message';
 import type { NovaGroupConfig, NovaPluginConfig, NovaPluginStats } from './types';
 
 export interface NovaPluginStateSnapshot {
@@ -55,6 +58,14 @@ class NovaPluginState {
       selfId: this.selfId,
     });
     await this.runtime.start();
+
+    // Wire the ActLoop executor: this callback bridges the core ActLoop to
+    // NapCat's OneBot send_msg action.  Called whenever the ActLoop dequeues
+    // a queued proactive action for execution.
+    this.runtime.setActExecutor(async (queuedAction, channel) => {
+      return await this.executeProactiveAction(ctx, queuedAction, channel);
+    });
+
     this.scheduler = new NovaScheduler({
       runtime: this.runtime,
       logger: this.logger,
@@ -68,6 +79,7 @@ class NovaPluginState {
     try {
       this.scheduler?.stop();
       this.scheduler = null;
+      this.runtime?.setActExecutor(null as unknown as import('../act/act-loop').ActExecutor);
       await this.runtime?.stop();
     } catch (error) {
       this.lastError = stringifyError(error);
@@ -223,11 +235,129 @@ class NovaPluginState {
       channelRateLimitPerMinute: config.channelRateLimitPerMinute,
       groupRateLimitPerMinute: config.groupRateLimitPerMinute,
       enableScheduledActions: config.enableScheduledActions,
+      proactiveEnabled: config.proactiveEnabled,
+      proactiveWhitelistQQ: config.proactiveWhitelistQQ,
+      iausScoringMode: config.iausScoringMode,
+      minProactiveUtility: config.minProactiveUtility,
+      groupMinProactiveUtility: config.groupMinProactiveUtility,
+      iausCompensationFactor: config.iausCompensationFactor,
+      socialSafetyMidpoint: config.socialSafetyMidpoint,
+      socialSafetySlope: config.socialSafetySlope,
+      iausDesireBoost: config.iausDesireBoost,
+      iausMomentumBonus: config.iausMomentumBonus,
+      iausMomentumDecayMs: config.iausMomentumDecayMs,
+      iausCurveModulationStrength: config.iausCurveModulationStrength,
+      iausThompsonEta: config.iausThompsonEta,
+      iausFairnessAlpha: config.iausFairnessAlpha,
+      iausFairnessMax: config.iausFairnessMax,
+      iausFairnessMinTotalService: config.iausFairnessMinTotalService,
       floodWindowMs: config.floodWindowMs,
       floodMessageLimit: config.floodMessageLimit,
       userFloodMessageLimit: config.userFloodMessageLimit,
       consecutiveSendFailureLimit: config.consecutiveSendFailureLimit,
     };
+  }
+
+  /**
+   * Execute a queued proactive action through the NapCat bridge.
+   *
+   * This is the ActExecutor callback wired into NovaRuntime.  It converts
+   * the QueuedAction into a send_text target, generates the message text
+   * via the runtime's LLM-based proactive responder (Step 12), and sends
+   * via the OneBot API.
+   */
+  private async executeProactiveAction(
+    ctx: NapCatPluginContext,
+    queuedAction: import('../act/action-queue').QueuedAction,
+    channel: import('../world/entities').ChannelAttrs | undefined,
+  ): Promise<SendResult> {
+    const target = queuedActionToSendTarget(queuedAction, channel);
+
+    // Step 12: LLM-generated proactive text via NovaResponder.
+    // Falls back gracefully if the runtime is unavailable or generation fails.
+    const text = await this.buildProactiveText(queuedAction, channel);
+    if (text === null) {
+      this.logger?.warn('Nova proactive text generation failed — action abandoned', {
+        queueId: queuedAction.id,
+        targetId: target.channelId,
+        desireType: queuedAction.candidate.desireType,
+      });
+      return {
+        ok: false,
+        actionType: 'send_text',
+        targetId: target.channelId,
+        error: 'proactive_text_generation_failed',
+        messageId: undefined,
+        createdMs: Date.now(),
+      };
+    }
+
+    const result = await sendText(
+      {
+        chatType: target.chatType,
+        userId: target.userId,
+        groupId: target.groupId,
+        channelId: target.channelId,
+      },
+      text,
+      {
+        ctx,
+        quoteReply: false,
+        maxReplyLength: this.config.maxReplyLength,
+      },
+    );
+
+    // Record in the in-memory action log for immediate observability.
+    // The persistent DB record and world update are handled by ActLoop.tick().
+    this.actionLog.recordSend(result);
+
+    if (result.ok) {
+      this.directedState.rememberNovaAction(
+        target.channelId,
+        target.chatType === 'private' ? target.userId : undefined,
+      );
+      this.logger?.info('Nova ActLoop sent proactive message', {
+        queueId: queuedAction.id,
+        tick: queuedAction.tick,
+        targetId: result.targetId,
+        scene: queuedAction.candidate.scene,
+        desireType: queuedAction.candidate.desireType,
+        textLength: text.length,
+        messageId: result.messageId,
+      });
+    } else {
+      this.logger?.warn('Nova ActLoop proactive send failed', {
+        queueId: queuedAction.id,
+        targetId: result.targetId,
+        error: result.error,
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Step 12: Generate proactive message text via the LLM.
+   *
+   * Delegates to NovaRuntime.buildProactiveMessage(), which uses
+   * NovaResponder.buildProactiveAction() with soul, relationship,
+   * memory, and thread context. Returns null if generation fails.
+   */
+  private async buildProactiveText(
+    queuedAction: import('../act/action-queue').QueuedAction,
+    channel: import('../world/entities').ChannelAttrs | undefined,
+  ): Promise<string | null> {
+    if (!this.runtime) return null;
+
+    try {
+      return await this.runtime.buildProactiveMessage(queuedAction, channel);
+    } catch (error) {
+      this.logger?.warn('Nova proactive text generation error', {
+        queueId: queuedAction.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   private createRuntimeLogger(ctx: NapCatPluginContext): NovaLogger {

@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { DEFAULT_KAPPA } from '../world/constants';
 import type { WorldModel } from '../world/model';
@@ -68,6 +68,8 @@ export class AdaptiveKappa {
   }
 }
 
+export const PRESSURE_HISTORY_SIZE = 10;
+
 export type PressureHistory = PressureDims[];
 
 export function createPressureHistory(): PressureHistory {
@@ -122,11 +124,12 @@ export function computeAllPressures(
     eta = 0.6,
     rho = 0.2,
     propagationConfig,
+    tickDt,
   } = options;
 
   const r1 = p1AttentionDebt(world, nowMs);
   const r2 = p2InformationPressure(world, tick, nowMs, d);
-  const r3 = p3RelationshipCooling(world, tick, nowMs);
+  const r3 = p3RelationshipCooling(world, tick, nowMs, undefined, tickDt);
   const r4 = p4ThreadDivergence(world, tick, nowMs, threadAgeScale);
   const r5 = p5ResponseObligation(world, tick, nowMs);
   const r6 = p6Curiosity(world, nowMs, eta);
@@ -186,7 +189,7 @@ export function computeAllPressures(
   };
   if (history) {
     history.push(rawTotals);
-    if (history.length > 10) history.shift();
+    if (history.length > PRESSURE_HISTORY_SIZE) history.shift();
   }
 
   return {

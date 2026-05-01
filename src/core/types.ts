@@ -1,4 +1,5 @@
 export type SilenceLevel = 'none' | 'soft' | 'normal' | 'hard' | 'safety';
+export type IAUSScoringMode = 'legacy_nsv' | 'consideration';
 
 export interface NovaRuntimeConfig {
   enabled: boolean;
@@ -25,6 +26,22 @@ export interface NovaRuntimeConfig {
   floodMessageLimit: number;
   userFloodMessageLimit: number;
   consecutiveSendFailureLimit: number;
+  proactiveEnabled: boolean;
+  proactiveWhitelistQQ: string[];
+  iausScoringMode: IAUSScoringMode;
+  minProactiveUtility: number;
+  groupMinProactiveUtility: number;
+  iausCompensationFactor: number;
+  socialSafetyMidpoint: number;
+  socialSafetySlope: number;
+  iausDesireBoost?: number;
+  iausMomentumBonus?: number;
+  iausMomentumDecayMs?: number;
+  iausCurveModulationStrength?: number;
+  iausThompsonEta?: number;
+  iausFairnessAlpha?: number;
+  iausFairnessMax?: number;
+  iausFairnessMinTotalService?: number;
 }
 
 export interface NovaMessageEvent {

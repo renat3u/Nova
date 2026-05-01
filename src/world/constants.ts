@@ -22,11 +22,19 @@ export const DUNBAR_TIER_THETA: Record<DunbarTier, number> = {
 };
 
 export const GROUP_PRESENCE_THETA: Record<DunbarTier, number> = {
-  5: 3600,
-  15: 7200,
-  50: 14400,
-  150: 28800,
-  500: 86400,
+  5: 1800,
+  15: 3600,
+  50: 7200,
+  150: 14400,
+  500: 43200,
+};
+
+export const PERIPHERAL_TIER_WINDOW_S: Record<DunbarTier, number> = {
+  5: 86400,
+  15: 43200,
+  50: 21600,
+  150: 7200,
+  500: 0,
 };
 
 export const P3_TAU_0 = 600;
@@ -47,7 +55,7 @@ export const PROPAGATION_WEIGHT = EDGE_CATEGORY_WEIGHT;
 
 export const CHAT_TYPE_WEIGHTS: Record<'private' | 'group', { attention: number; response: number }> = {
   private: { attention: 3.0, response: 2.0 },
-  group: { attention: 0.7, response: 0.9 },
+  group: { attention: 1.0, response: 1.0 },
 };
 
 export interface PressureDimensionSpec {
@@ -55,7 +63,7 @@ export interface PressureDimensionSpec {
   typicalScale: number;
 }
 
-export const PRESSURE_SPECS: Record<string, PressureDimensionSpec> = {
+export const PRESSURE_SPECS: Record<'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6', PressureDimensionSpec> = {
   P1: { kappaMin: 15.0, typicalScale: 200 },
   P2: { kappaMin: 20.0, typicalScale: 50 },
   P3: { kappaMin: 10.0, typicalScale: 8 },
@@ -65,12 +73,12 @@ export const PRESSURE_SPECS: Record<string, PressureDimensionSpec> = {
 };
 
 export const DEFAULT_KAPPA: [number, number, number, number, number, number] = [
-  15.0,
-  20.0,
-  10.0,
-  5.0,
-  50.0,
-  0.5,
+  PRESSURE_SPECS.P1.kappaMin,
+  PRESSURE_SPECS.P2.kappaMin,
+  PRESSURE_SPECS.P3.kappaMin,
+  PRESSURE_SPECS.P4.kappaMin,
+  PRESSURE_SPECS.P5.kappaMin,
+  PRESSURE_SPECS.P6.kappaMin,
 ];
 
 export function tierBiasCorrection(tier: DunbarTier, sigma2: number | undefined): DunbarTier {

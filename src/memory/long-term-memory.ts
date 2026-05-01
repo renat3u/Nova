@@ -1,6 +1,13 @@
 import type { NovaSqliteDatabase } from '../db/sqlite';
 import { makeId } from '../world/constants';
 import type { FactAttrs, FactType } from '../world/entities';
+import {
+  CONSOLIDATION_WINDOW_MS,
+  INITIAL_SALIENCE,
+  MAX_SALIENCE,
+  SALIENCE_BUMP,
+  SIMILARITY_THRESHOLD,
+} from './working-memory';
 
 export interface AddFactCandidate {
   content: string;
@@ -38,11 +45,16 @@ export class LongTermMemory {
 
   addFact(candidate: AddFactCandidate): FactAttrs {
     const now = candidate.nowMs ?? Date.now();
-    const existing = this.findSimilarFact(candidate.content, candidate.subjectId);
+    const content = candidate.content.trim();
+
+    // 查找可能合并的已有事实 (含 consolidation window)
+    const existing = this.findSimilarFact(content, candidate.subjectId, now);
     if (existing) {
+      // 合并: 提升 importance, 更新 stability, 刷新 access time
       const updated: FactAttrs = {
         ...existing,
-        importance: Math.max(existing.importance, candidate.importance ?? existing.importance),
+        content: mergeContent(existing.content, content),
+        importance: Math.min(MAX_SALIENCE, Math.max(existing.importance, candidate.importance ?? existing.importance) + SALIENCE_BUMP),
         stability: Math.max(existing.stability * 1.1, candidate.stability ?? existing.stability),
         last_access_ms: now,
       };
@@ -53,9 +65,9 @@ export class LongTermMemory {
     const fact: FactAttrs = {
       id: makeId('fact'),
       entity_type: 'fact',
-      content: candidate.content.trim(),
+      content,
       fact_type: candidate.factType ?? 'observation',
-      importance: candidate.importance ?? 0.5,
+      importance: candidate.importance ?? INITIAL_SALIENCE,
       volatility: candidate.volatility ?? 0.01,
       stability: candidate.stability ?? defaultStability(candidate.factType),
       tracked: candidate.tracked ?? true,
@@ -121,7 +133,12 @@ export class LongTermMemory {
     });
   }
 
-  private findSimilarFact(content: string, subjectId: string | undefined): FactAttrs | undefined {
+  private findSimilarFact(
+    content: string,
+    subjectId: string | undefined,
+    nowMs: number,
+  ): FactAttrs | undefined {
+    const cutoff = nowMs - CONSOLIDATION_WINDOW_MS;
     const normalized = normalize(content);
     const rows = this.db.prepare(`
       SELECT id, subject_id, content, fact_type, importance, volatility, stability, tracked, created_ms, last_access_ms
@@ -132,8 +149,14 @@ export class LongTermMemory {
     `).all(subjectId ?? null, subjectId ?? null) as FactRow[];
 
     return rows.map(factFromRow).find((fact) => {
+      // 超出合并窗口的不合并
+      if (fact.last_access_ms < cutoff) return false;
+      // 不同 subject 的不合并
+      if (subjectId !== undefined && fact.subject_id !== subjectId) return false;
       const other = normalize(fact.content);
-      return normalized.includes(other) || other.includes(normalized) || overlap(tokenize(normalized), tokenize(other)) >= 0.7;
+      if (normalized.includes(other) || other.includes(normalized)) return true;
+      if (overlap(tokenize(normalized), tokenize(other)) >= (1 - SIMILARITY_THRESHOLD + 0.35)) return true;
+      return false;
     });
   }
 }
@@ -183,4 +206,11 @@ function overlap(left: Set<string>, right: Set<string>): number {
     if (right.has(token)) intersection += 1;
   }
   return intersection / Math.min(left.size, right.size);
+}
+
+function mergeContent(existing: string, next: string): string {
+  if (existing.includes(next)) return existing;
+  if (next.includes(existing)) return next;
+  const merged = `${existing}\n${next}`;
+  return merged.length > 300 ? merged.slice(0, 300).trimEnd() : merged;
 }

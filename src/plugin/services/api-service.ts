@@ -12,6 +12,17 @@ export interface NovaStatusResponse {
   silenceCount: number;
   lastTickAt?: number;
   lastError?: string;
+  queue?: {
+    pending: number;
+    total: number;
+    executing: number;
+    done: number;
+    failed: number;
+  };
+  activeEngagements?: number;
+  lastEvolve?: Record<string, unknown>;
+  lastPressure?: Record<string, unknown>;
+  lastActionTrace?: Record<string, unknown>;
 }
 
 export function registerApiRoutes(ctx: NapCatPluginContext): void {
@@ -32,10 +43,57 @@ export function registerApiRoutes(ctx: NapCatPluginContext): void {
       ...(entry.error === undefined ? {} : { error: entry.error }),
       createdMs: entry.createdMs,
     }));
-    res.json({ code: 0, data: runtimeActions.length > 0 ? runtimeActions : fallbackActions });
+    // Step 18: 附带最近一次 action trace 的 reasoning 和 voice 信息
+    const lastActionTrace = novaPluginState.runtime?.lastActionTrace;
+    res.json({
+      code: 0,
+      data: runtimeActions.length > 0 ? runtimeActions : fallbackActions,
+      ...(lastActionTrace ? {
+        _trace: {
+          reasoning: lastActionTrace.reasoning,
+          voice: lastActionTrace.voice,
+          engagementOutcome: lastActionTrace.engagementOutcome,
+        },
+      } : {}),
+    });
   });
 
   ctx.router.getNoAuth('/silences', (req, res) => {
+    const limit = readLimit(req.params.limit);
+    res.json({ code: 0, data: novaPluginState.runtime?.getRecentSilences(limit) ?? [] });
+  });
+
+  // ── Step 18: Trace 可观测性 API ──────────────────────────────────────────
+
+  ctx.router.getNoAuth('/traces/ticks', (req, res) => {
+    const limit = readLimit(req.params.limit);
+    const reason = req.params.reason === 'message' || req.params.reason === 'scheduled'
+      ? req.params.reason as 'message' | 'scheduled'
+      : undefined;
+    const traces = novaPluginState.runtime?.getTickTraces(limit, reason) ?? [];
+    res.json({ code: 0, data: traces });
+  });
+
+  ctx.router.getNoAuth('/traces/proactive', (req, res) => {
+    const limit = readLimit(req.params.limit);
+    const summaries = novaPluginState.runtime?.getProactiveTraceSummaries(limit) ?? [];
+    res.json({ code: 0, data: summaries });
+  });
+
+  ctx.router.getNoAuth('/traces/actions', (req, res) => {
+    const limit = readLimit(req.params.limit);
+    res.json({ code: 0, data: novaPluginState.runtime?.getActionTraces(limit) ?? [] });
+  });
+
+  ctx.router.getNoAuth('/traces/deliberations', (req, res) => {
+    const limit = readLimit(req.params.limit);
+    const reason = req.params.reason === 'message' || req.params.reason === 'scheduled'
+      ? req.params.reason as 'message' | 'scheduled'
+      : undefined;
+    res.json({ code: 0, data: novaPluginState.runtime?.getDeliberationTraces(limit, reason) ?? [] });
+  });
+
+  ctx.router.getNoAuth('/traces/silences', (req, res) => {
     const limit = readLimit(req.params.limit);
     res.json({ code: 0, data: novaPluginState.runtime?.getRecentSilences(limit) ?? [] });
   });
@@ -73,6 +131,30 @@ export function registerApiRoutes(ctx: NapCatPluginContext): void {
 
     novaPluginState.updateGroupConfig(groupId, { enabled });
     res.json({ code: 0, data: getGroup(groupId) });
+  });
+
+  ctx.router.getNoAuth('/queue', (_req, res) => {
+    const runtime = novaPluginState.runtime;
+    if (!runtime) {
+      res.json({ code: 0, data: [] });
+      return;
+    }
+    const queueList = runtime.actionQueue.list().map((item) => ({
+      id: item.id,
+      tick: item.tick,
+      action: item.candidate.action,
+      targetId: item.candidate.targetId,
+      scene: item.candidate.scene,
+      desireType: item.candidate.desireType,
+      urgency: item.candidate.urgency,
+      status: item.status,
+      promptContextSummary: item.promptContextSummary,
+      enqueuedMs: item.enqueuedMs,
+      startedMs: item.startedMs,
+      completedMs: item.completedMs,
+      error: item.error,
+    }));
+    res.json({ code: 0, data: queueList });
   });
 
   ctx.router.getNoAuth('/config', (_req, res) => {

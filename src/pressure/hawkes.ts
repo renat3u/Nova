@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import type { DunbarTier } from '../world/entities';
 

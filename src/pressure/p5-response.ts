@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { CHAT_TYPE_WEIGHTS, DUNBAR_TIER_WEIGHT, contactIdForPrivateChannel } from '../world/constants';
 import { getActiveConversation } from '../world/queries';

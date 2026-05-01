@@ -1,4 +1,4 @@
-// Alice baseline reference: personality/voices model adapted for Nova QQ runtime.
+
 
 export const VOICES = [
   { id: 'diligence', short: 'D', display: 'Diligence', index: 0 },
@@ -40,6 +40,14 @@ export const VOICE_BY_INDEX: Record<number, VoiceId> = {
   2: 'sociability',
   3: 'caution',
 };
+
+export const IAUS_ACTIONS: readonly VoiceId[] = ['diligence', 'curiosity', 'sociability'] as const;
+export type IAUSAction = (typeof IAUS_ACTIONS)[number];
+
+/** Map a selected voice to its IAUS action. Returns null for caution. */
+export function voiceToIAUSAction(voice: VoiceId): IAUSAction | null {
+  return (IAUS_ACTIONS as readonly string[]).includes(voice) ? voice as IAUSAction : null;
+}
 
 export function personalityToWeights(vector: PersonalityVector): VoiceWeights {
   return [vector.diligence, vector.curiosity, vector.sociability, vector.caution];

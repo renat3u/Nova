@@ -1,6 +1,6 @@
-// Alice baseline reference: personality/voices model adapted for Nova QQ runtime.
 
-import { VOICE_BY_INDEX, VOICES, type VoiceId } from './personality';
+
+import { VOICE_BY_INDEX, VOICES, voiceToIAUSAction, type IAUSAction, type VoiceId } from './personality';
 
 export interface VoiceSelectionOptions {
   deterministic?: boolean;
@@ -8,13 +8,27 @@ export interface VoiceSelectionOptions {
 }
 
 export interface VoiceSelectionResult {
+  /** The winning voice id (diligence / curiosity / sociability / caution). */
   selected: VoiceId;
+  /** Raw loudness values per voice before softmax. */
   loudness: Record<VoiceId, number>;
+  /** Softmax probability per voice. */
   probabilities: Record<VoiceId, number>;
+  /** Adaptive temperature used for softmax. */
   temperature: number;
+  /** Fatigue multiplier per voice. */
   fatigue: Record<VoiceId, number>;
+  /** Human-readable reasons for the focal signals. */
   reasons: string[];
+  /**
+   * The IAUS action derived from the selected voice.
+   * Null when the selected voice is caution — caution never produces
+   * a standalone proactive action; it only influences gates / silence / prompt restraint.
+   */
+  iausAction: IAUSAction | null;
 }
+
+export type { IAUSAction };
 
 export function selectVoice(
   loudness: Record<VoiceId, number>,
@@ -39,6 +53,7 @@ export function selectVoice(
     temperature,
     fatigue,
     reasons: [...reasons],
+    iausAction: voiceToIAUSAction(selected),
   };
 }
 

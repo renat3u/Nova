@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 import { DUNBAR_TIER_WEIGHT } from '../world/constants';
 import type { ContactAttrs, DunbarTier } from '../world/entities';
@@ -6,12 +6,14 @@ import type { WorldModel } from '../world/model';
 import { elapsedS, readNodeMs } from './clock';
 import type { PressureResult } from './types';
 
-const TAU_CURIOSITY = 3000;
+export const CHANNEL_HUNGER_TAU_S = 21600;
+export const CHANNEL_CURIOSITY_WEIGHT = 0.3;
+export const TAU_CURIOSITY = 3000;
+export const SIGMA_HALF_LIFE = 10;
+export const DUNBAR_150 = 150;
+export const FAMILIARITY_DAYS = 7;
+
 const MAX_TIER_WEIGHT = Math.max(...Object.values(DUNBAR_TIER_WEIGHT));
-const SIGMA_HALF_LIFE = 10;
-const DUNBAR_150 = 150;
-const FAMILIARITY_DAYS = 7;
-const GROUP_AMBIENT_WEIGHT = 0.08;
 
 const TIER_EXPECTED_SILENCE_S: Record<DunbarTier, number> = {
   5: 14400,
@@ -61,17 +63,33 @@ export function p6Curiosity(world: WorldModel, nowMs: number, eta = 0.6, k = 20)
 
   for (const channelId of world.getEntitiesByType('channel')) {
     const attrs = world.getChannel(channelId);
-    if (attrs.chat_type !== 'group' || attrs.unread <= 0) continue;
+    if (attrs.chat_type !== 'group') continue;
+    const unread = attrs.unread ?? 0;
+    if (unread <= 0) continue;
+
+    const lastReadMs = Number(attrs.last_read_ms ?? 0);
+    const sinceReadS = lastReadMs > 0 ? elapsedS(nowMs, lastReadMs) : 0;
     const lastActivityMs = readNodeMs(world, channelId, 'last_activity_ms');
-    if (lastActivityMs <= 0) continue;
-    const ambient = GROUP_AMBIENT_WEIGHT * Math.log1p(attrs.unread) * Math.min(1, elapsedS(nowMs, lastActivityMs) / 21600);
-    if (ambient > 0) contributions[channelId] = ambient;
+    const effectiveSinceS = sinceReadS > 0 ? sinceReadS : elapsedS(nowMs, lastActivityMs);
+    if (effectiveSinceS <= 0) continue;
+
+    const hunger = 1 - Math.exp(-effectiveSinceS / CHANNEL_HUNGER_TAU_S);
+    const channelCuriosity = CHANNEL_CURIOSITY_WEIGHT * hunger * Math.log1p(unread);
+    if (channelCuriosity > 0) {
+      contributions[channelId] = channelCuriosity;
+      surpriseSum += 1 - hunger;
+      sourceCount++;
+    }
   }
 
   const noveltyThisTick = sourceCount > 0 ? surpriseSum / sourceCount : 0;
   noveltyHistory.push(noveltyThisTick);
   if (noveltyHistory.length > k) noveltyHistory.shift();
-  const meanNovelty = noveltyHistory.reduce((a, b) => a + b, 0) / Math.max(1, noveltyHistory.length);  const subtractiveTotal = Math.max(0, eta - meanNovelty);
+
+  const meanNovelty = noveltyHistory.length > 0
+    ? noveltyHistory.reduce((a, b) => a + b, 0) / noveltyHistory.length
+    : 0;
+  const subtractiveTotal = Math.max(0, eta - meanNovelty);
   const contactFamiliarity = Math.min(1, contactIds.length / DUNBAR_150);
   const timeFamiliarity = Math.min(1, graphAgeDays / FAMILIARITY_DAYS);
   const ambientCuriosity = eta * (1 - contactFamiliarity * timeFamiliarity);
@@ -81,6 +99,8 @@ export function p6Curiosity(world: WorldModel, nowMs: number, eta = 0.6, k = 20)
   if (rawSum > 0 && total > 0) {
     const scale = total / rawSum;
     for (const key of Object.keys(contributions)) contributions[key] = (contributions[key] ?? 0) * scale;
+  } else if (rawSum > 0 && total === 0) {
+    for (const key of Object.keys(contributions)) contributions[key] = 0;
   }
 
   return { total, contributions };

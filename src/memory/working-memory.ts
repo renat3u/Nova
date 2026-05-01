@@ -1,5 +1,35 @@
 import type { NovaSqliteDatabase } from '../db/sqlite';
-import { WORKING_MEMORY_SLOTS, clamp01, makeId } from '../world/constants';
+import { WORKING_MEMORY_SLOTS, makeId } from '../world/constants';
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const DIARY_CAPACITY = WORKING_MEMORY_SLOTS; // 7
+
+export const DIARY_CAP_PER_TURN = 2;
+
+export const MAX_ENTRY_LENGTH = 200;
+
+export const INJECT_LIMIT = 5;
+
+export const SIMILARITY_THRESHOLD = 0.35;
+
+export const SALIENCE_HALF_LIFE_MS = 6 * 3600 * 1000;
+
+export const INITIAL_SALIENCE = 1.0;
+
+export const SALIENCE_BUMP = 0.15;
+
+export const MAX_SALIENCE = 2.0;
+
+export const INJECT_FLOOR = 0.05;
+
+export const CONSOLIDATION_WINDOW_MS = 24 * 3600 * 1000;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 类型
+// ═══════════════════════════════════════════════════════════════════════════
 
 export interface WorkingMemoryItem {
   id: string;
@@ -17,7 +47,9 @@ export interface WorkingMemoryCandidate {
   nowMs?: number;
 }
 
-const DECAY_HALF_LIFE_MS = 6 * 60 * 60 * 1000;
+// ═══════════════════════════════════════════════════════════════════════════
+// WorkingMemory
+// ═══════════════════════════════════════════════════════════════════════════
 
 export class WorkingMemory {
   private readonly items = new Map<string, WorkingMemoryItem>();
@@ -49,15 +81,24 @@ export class WorkingMemory {
   }
 
   addCandidate(candidate: WorkingMemoryCandidate): WorkingMemoryItem | null {
-    const content = candidate.content.trim();
+    let content = candidate.content.trim();
     if (content.length === 0) return null;
+
+    if (content.length > MAX_ENTRY_LENGTH) {
+      content = content.slice(0, MAX_ENTRY_LENGTH).trimEnd();
+    }
 
     const now = candidate.nowMs ?? Date.now();
     this.decay(now);
-    const similar = this.findSimilar(content);
+
+    // 相似合并 (含 24h consolidation window)
+    const similar = this.findSimilar(content, now);
     if (similar) {
       similar.content = mergeContent(similar.content, content);
-      similar.salience = clamp01(Math.max(similar.salience, candidate.salience ?? 0.5) + 0.1);
+      similar.salience = Math.min(
+        MAX_SALIENCE,
+        Math.max(similar.salience, candidate.salience ?? INITIAL_SALIENCE) + SALIENCE_BUMP,
+      );
       similar.updatedMs = now;
       if (candidate.sourceEventId) similar.sourceEventId = candidate.sourceEventId;
       this.flush();
@@ -67,7 +108,7 @@ export class WorkingMemory {
     const item: WorkingMemoryItem = {
       id: makeId('wm'),
       content,
-      salience: clamp01(candidate.salience ?? 0.5),
+      salience: Math.min(MAX_SALIENCE, candidate.salience ?? INITIAL_SALIENCE),
       createdMs: now,
       updatedMs: now,
       ...(candidate.sourceEventId === undefined ? {} : { sourceEventId: candidate.sourceEventId }),
@@ -78,60 +119,31 @@ export class WorkingMemory {
     return item;
   }
 
-  getTopItems(limit = this.slots, nowMs = Date.now()): WorkingMemoryItem[] {
-    this.decay(nowMs);
-    return Array.from(this.items.values())
-      .sort((a, b) => b.salience - a.salience || b.updatedMs - a.updatedMs)
-      .slice(0, Math.max(0, Math.trunc(limit)))
-      .map((item) => ({ ...item }));
-  }
-
-  flush(): void {
-    const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM working_memory').run();
-      const insert = this.db.prepare(`
-        INSERT INTO working_memory (id, content, salience, created_ms, updated_ms, source_event_id)
-        VALUES (@id, @content, @salience, @created_ms, @updated_ms, @source_event_id)
-      `);
-      for (const item of this.getTopItems(this.slots)) {
-        insert.run({
-          id: item.id,
-          content: item.content,
-          salience: item.salience,
-          created_ms: item.createdMs,
-          updated_ms: item.updatedMs,
-          source_event_id: item.sourceEventId ?? null,
-        });
-      }
-    });
-    transaction();
-  }
-
-  private decay(nowMs: number): void {
-    for (const item of this.items.values()) {
-      const elapsed = Math.max(0, nowMs - item.updatedMs);
-      const factor = 0.5 ** (elapsed / DECAY_HALF_LIFE_MS);
-      item.salience = clamp01(item.salience * factor);
-    }
-  }
-
-  private findSimilar(content: string): WorkingMemoryItem | undefined {
+  private findSimilar(content: string, nowMs: number): WorkingMemoryItem | undefined {
+    const cutoff = nowMs - CONSOLIDATION_WINDOW_MS;
     const normalized = normalize(content);
     for (const item of this.items.values()) {
+      // 超出合并窗口的不合并
+      if (item.updatedMs < cutoff) continue;
       const other = normalize(item.content);
       if (normalized.includes(other) || other.includes(normalized)) return item;
-      if (jaccard(normalized, other) >= 0.55) return item;
+      if (jaccard(normalized, other) >= SIMILARITY_THRESHOLD) return item;
     }
     return undefined;
   }
 
   private prune(): void {
-    const sorted = Array.from(this.items.values()).sort((a, b) => b.salience - a.salience || b.updatedMs - a.updatedMs);
+    const sorted = Array.from(this.items.values())
+      .sort((a, b) => b.salience - a.salience || b.updatedMs - a.updatedMs);
     for (const item of sorted.slice(this.slots)) {
       this.items.delete(item.id);
     }
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 内部类型
+// ═══════════════════════════════════════════════════════════════════════════
 
 interface WorkingMemoryRow {
   id: string;
@@ -140,6 +152,19 @@ interface WorkingMemoryRow {
   created_ms: number;
   updated_ms: number;
   source_event_id: string | null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function effectiveSalience(
+  item: { salience: number; updatedMs: number },
+  nowMs: number,
+): number {
+  const age = nowMs - item.updatedMs;
+  if (age <= 0) return item.salience;
+  return item.salience * 0.5 ** (age / SALIENCE_HALF_LIFE_MS);
 }
 
 function normalize(value: string): string {
@@ -160,5 +185,7 @@ function jaccard(a: string, b: string): number {
 function mergeContent(existing: string, next: string): string {
   if (existing.includes(next)) return existing;
   if (next.includes(existing)) return next;
-  return `${existing}\n${next}`;
+  const merged = `${existing}\n${next}`;
+  // 防止合并后超出长度限制
+  return merged.length > MAX_ENTRY_LENGTH ? merged.slice(0, MAX_ENTRY_LENGTH).trimEnd() : merged;
 }

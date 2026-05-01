@@ -1,4 +1,4 @@
-// Alice baseline reference: pressure model adapted for Nova QQ runtime.
+
 
 export type PressureDims = [number, number, number, number, number, number];
 

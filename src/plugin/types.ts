@@ -1,3 +1,5 @@
+import type { IAUSScoringMode } from '../core/types';
+
 export type NovaCoreMode = 'embedded';
 
 export interface NovaGroupConfig {
@@ -26,6 +28,22 @@ export interface NovaPluginConfig {
   channelRateLimitPerMinute: number;
   groupRateLimitPerMinute: number;
   enableScheduledActions: boolean;
+  proactiveEnabled: boolean;
+  proactiveWhitelistQQ: string[];
+  iausScoringMode: IAUSScoringMode;
+  minProactiveUtility: number;
+  groupMinProactiveUtility: number;
+  iausCompensationFactor: number;
+  socialSafetyMidpoint: number;
+  socialSafetySlope: number;
+  iausDesireBoost: number;
+  iausMomentumBonus: number;
+  iausMomentumDecayMs: number;
+  iausCurveModulationStrength: number;
+  iausThompsonEta: number;
+  iausFairnessAlpha: number;
+  iausFairnessMax: number;
+  iausFairnessMinTotalService: number;
   floodWindowMs: number;
   floodMessageLimit: number;
   userFloodMessageLimit: number;

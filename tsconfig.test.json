@@ -1,0 +1,35 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-test",
+    "rootDir": "src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "declaration": false
+  },
+  "include": [
+    "src/llm/**/*.ts",
+    "src/voices/personality.ts",
+    "src/voices/selection.ts",
+    "src/personality/vector.ts",
+    "src/pressure/aggregate.ts",
+    "src/core/types.ts",
+    "src/world/constants.ts",
+    "src/world/model.ts",
+    "src/utils/math.ts",
+    "src/pressure/p-prospect.ts",
+    "src/pressure/p1-attention.ts",
+    "src/pressure/p2-information.ts",
+    "src/pressure/p3-relationship.ts",
+    "src/pressure/p4-thread.ts",
+    "src/pressure/p5-response.ts",
+    "src/pressure/p6-curiosity.ts",
+    "src/pressure/propagation.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-test"
+  ]
+}

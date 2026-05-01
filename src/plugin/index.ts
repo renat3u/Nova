@@ -4,7 +4,7 @@ import type {
   PluginConfigUIController,
   PluginModule,
 } from './types';
-import { buildConfigSchema } from './config';
+import { buildConfigSchema, normalizeWhitelistQQ } from './config';
 import { handleMessage } from './handlers/message-handler';
 import { registerApiRoutes } from './services/api-service';
 import { novaPluginState } from './state';
@@ -68,11 +68,28 @@ export const plugin_on_config_change: PluginModule['plugin_on_config_change'] = 
 };
 
 function parseReactiveConfigValue(key: string, value: unknown): unknown {
-  if (key !== 'enabledGroups' || typeof value !== 'string') return value;
-
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return {};
+  // Text fields that hold JSON arrays — parse the string and normalize.
+  if (key === 'enabledGroups' && typeof value === 'string') {
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return {};
+    }
   }
+
+  if (key === 'proactiveWhitelistQQ') {
+    if (typeof value === 'string') {
+      try {
+        return normalizeWhitelistQQ(JSON.parse(value) as unknown);
+      } catch {
+        return [];
+      }
+    }
+    if (Array.isArray(value)) {
+      return normalizeWhitelistQQ(value);
+    }
+    return [];
+  }
+
+  return value;
 }

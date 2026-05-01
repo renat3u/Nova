@@ -136,6 +136,9 @@ async function executeActions(ctx: NapCatPluginContext, event: NovaMessageEvent,
         status: result.ok ? 'success' : 'failed',
         error: result.error,
         createdMs: result.createdMs,
+        proactive: false,
+        channelId: event.chatId,
+        contactId: event.senderId,
       });
 
       if (result.ok) {

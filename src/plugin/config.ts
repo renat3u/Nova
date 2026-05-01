@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { IAUSScoringMode } from '../core/types';
 import type { NapCatPluginContext, PluginConfigSchema } from './types';
 import type { NovaGroupConfig, NovaPluginConfig } from './types';
 
@@ -26,11 +27,55 @@ export const DEFAULT_NOVA_CONFIG: NovaPluginConfig = {
   channelRateLimitPerMinute: 6,
   groupRateLimitPerMinute: 4,
   enableScheduledActions: false,
+  proactiveEnabled: false,
+  proactiveWhitelistQQ: [],
+  iausScoringMode: 'consideration',
+  minProactiveUtility: 0.05,
+  groupMinProactiveUtility: 0.08,
+  iausCompensationFactor: 0.5,
+  socialSafetyMidpoint: 0.45,
+  socialSafetySlope: 0.15,
+  iausDesireBoost: 0.15,
+  iausMomentumBonus: 0.2,
+  iausMomentumDecayMs: 300_000,
+  iausCurveModulationStrength: 0.5,
+  iausThompsonEta: 0,
+  iausFairnessAlpha: 2.0,
+  iausFairnessMax: 4.0,
+  iausFairnessMinTotalService: 5,
   floodWindowMs: 10000,
   floodMessageLimit: 30,
   userFloodMessageLimit: 8,
   consecutiveSendFailureLimit: 3,
 };
+
+/**
+ * Normalize a raw proactive whitelist input into a clean, deduplicated string array.
+ *
+ * Rules (per Phase 2 Step 10 QQ format requirements):
+ *  - Trim leading / trailing whitespace from each entry.
+ *  - Discard empty strings.
+ *  - Keep every QQ number as a string — never convert to number (avoids
+ *    precision loss and leading-zero stripping).
+ *  - Deduplicate.
+ */
+export function normalizeWhitelistQQ(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (trimmed.length === 0) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+
+  return result;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -38,6 +83,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function defaultDbPath(dataPath?: string): string {
   return dataPath ? path.join(dataPath, DEFAULT_DB_FILENAME) : DEFAULT_DB_FILENAME;
+}
+
+function normalizeIausScoringMode(value: unknown): IAUSScoringMode {
+  return value === 'legacy_nsv' || value === 'consideration' ? value : DEFAULT_NOVA_CONFIG.iausScoringMode;
 }
 
 function numberInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -107,6 +156,24 @@ export function normalizePluginConfig(raw: unknown, dataPath?: string): NovaPlug
     enableScheduledActions: typeof raw.enableScheduledActions === 'boolean'
       ? raw.enableScheduledActions
       : defaults.enableScheduledActions,
+    proactiveEnabled: typeof raw.proactiveEnabled === 'boolean'
+      ? raw.proactiveEnabled
+      : defaults.proactiveEnabled,
+    proactiveWhitelistQQ: normalizeWhitelistQQ(raw.proactiveWhitelistQQ),
+    iausScoringMode: normalizeIausScoringMode(raw.iausScoringMode),
+    minProactiveUtility: numberInRange(raw.minProactiveUtility, defaults.minProactiveUtility, 0, 1),
+    groupMinProactiveUtility: numberInRange(raw.groupMinProactiveUtility, defaults.groupMinProactiveUtility, 0, 1),
+    iausCompensationFactor: numberInRange(raw.iausCompensationFactor, defaults.iausCompensationFactor, 0, 1),
+    socialSafetyMidpoint: numberInRange(raw.socialSafetyMidpoint, defaults.socialSafetyMidpoint, 0, 1),
+    socialSafetySlope: numberInRange(raw.socialSafetySlope, defaults.socialSafetySlope, 0.01, 1),
+    iausDesireBoost: numberInRange(raw.iausDesireBoost, defaults.iausDesireBoost, 0, 2),
+    iausMomentumBonus: numberInRange(raw.iausMomentumBonus, defaults.iausMomentumBonus, 0, 2),
+    iausMomentumDecayMs: integerInRange(raw.iausMomentumDecayMs, defaults.iausMomentumDecayMs, 0, 86_400_000),
+    iausCurveModulationStrength: numberInRange(raw.iausCurveModulationStrength, defaults.iausCurveModulationStrength, 0, 1),
+    iausThompsonEta: numberInRange(raw.iausThompsonEta, defaults.iausThompsonEta, 0, 2),
+    iausFairnessAlpha: numberInRange(raw.iausFairnessAlpha, defaults.iausFairnessAlpha, 0, 8),
+    iausFairnessMax: numberInRange(raw.iausFairnessMax, defaults.iausFairnessMax, 1, 20),
+    iausFairnessMinTotalService: integerInRange(raw.iausFairnessMinTotalService, defaults.iausFairnessMinTotalService, 0, 1000),
     floodWindowMs: integerInRange(raw.floodWindowMs, defaults.floodWindowMs, 1000, 600000),
     floodMessageLimit: integerInRange(raw.floodMessageLimit, defaults.floodMessageLimit, 1, 10000),
     userFloodMessageLimit: integerInRange(raw.userFloodMessageLimit, defaults.userFloodMessageLimit, 1, 10000),
@@ -157,7 +224,34 @@ export function buildConfigSchema(ctx: NapCatPluginContext): PluginConfigSchema 
     ctx.NapCatConfig.number('globalRateLimitPerMinute', '全局每分钟上限', DEFAULT_NOVA_CONFIG.globalRateLimitPerMinute, 'Nova 全局发送频率上限', true),
     ctx.NapCatConfig.number('channelRateLimitPerMinute', '单会话每分钟上限', DEFAULT_NOVA_CONFIG.channelRateLimitPerMinute, '单个私聊或群聊发送频率上限', true),
     ctx.NapCatConfig.number('groupRateLimitPerMinute', '单群每分钟上限', DEFAULT_NOVA_CONFIG.groupRateLimitPerMinute, '单个 QQ 群发送频率上限', true),
-    ctx.NapCatConfig.boolean('enableScheduledActions', '启用定时主动行为', false, '关闭时 scheduled tick 只观察和记录沉默', true),
+    ctx.NapCatConfig.boolean('enableScheduledActions', '启用定时主动行为', false, 'scheduled tick 是否允许产生主动行为计划；关闭时 scheduled tick 只观察和记录沉默', true),
+    ctx.NapCatConfig.boolean('proactiveEnabled', '启用主动发言', false, '主动发言总开关；关闭后 scheduled tick 仅观察和记录，绝不发送消息', true),
+    {
+      key: 'iausScoringMode',
+      type: 'select',
+      label: 'IAUS 评分模式',
+      default: DEFAULT_NOVA_CONFIG.iausScoringMode,
+      description: 'legacy_nsv 使用 ΔP-λ·C_social；consideration 使用 Nova-style 多因素效用评分',
+      options: [
+        { label: 'consideration', value: 'consideration' },
+        { label: 'legacy_nsv', value: 'legacy_nsv' },
+      ],
+      reactive: true,
+    },
+    ctx.NapCatConfig.number('minProactiveUtility', '主动效用下限', DEFAULT_NOVA_CONFIG.minProactiveUtility, 'consideration 模式下私聊主动行为最低效用；越低越容易主动说话', true),
+    ctx.NapCatConfig.number('groupMinProactiveUtility', '群主动效用下限', DEFAULT_NOVA_CONFIG.groupMinProactiveUtility, 'consideration 模式下群聊主动行为最低效用，建议略高于私聊', true),
+    ctx.NapCatConfig.number('iausCompensationFactor', 'IAUS 补偿因子', DEFAULT_NOVA_CONFIG.iausCompensationFactor, '缓解多 consideration 相乘导致分数过低，范围 0~1', true),
+    ctx.NapCatConfig.number('socialSafetyMidpoint', '社交安全曲线 midpoint', DEFAULT_NOVA_CONFIG.socialSafetyMidpoint, '控制 social cost 软惩罚的中点，范围 0~1', true),
+    ctx.NapCatConfig.number('socialSafetySlope', '社交安全曲线 slope', DEFAULT_NOVA_CONFIG.socialSafetySlope, '控制 social cost 软惩罚的斜率，范围 0.01~1', true),
+    ctx.NapCatConfig.number('iausDesireBoost', 'IAUS desire 加成', DEFAULT_NOVA_CONFIG.iausDesireBoost, 'Nova-style desire 乘法加成系数', true),
+    ctx.NapCatConfig.number('iausMomentumBonus', 'IAUS momentum 加成', DEFAULT_NOVA_CONFIG.iausMomentumBonus, '上一赢家延续时的乘法加成系数', true),
+    ctx.NapCatConfig.number('iausMomentumDecayMs', 'IAUS momentum 衰减毫秒', DEFAULT_NOVA_CONFIG.iausMomentumDecayMs, '上一赢家 momentum 生效窗口', true),
+    ctx.NapCatConfig.number('iausCurveModulationStrength', 'IAUS 曲线人格调制', DEFAULT_NOVA_CONFIG.iausCurveModulationStrength, '人格权重调制 consideration 曲线的强度，范围 0~1', true),
+    ctx.NapCatConfig.number('iausThompsonEta', 'IAUS Thompson 噪声', DEFAULT_NOVA_CONFIG.iausThompsonEta, '候选选择探索噪声；0 表示关闭随机扰动', true),
+    ctx.NapCatConfig.number('iausFairnessAlpha', 'IAUS fairness alpha', DEFAULT_NOVA_CONFIG.iausFairnessAlpha, 'CFS-inspired 服务公平性幂律强度', true),
+    ctx.NapCatConfig.number('iausFairnessMax', 'IAUS fairness 上限', DEFAULT_NOVA_CONFIG.iausFairnessMax, '欠服务目标最多获得的 fairness 加成', true),
+    ctx.NapCatConfig.number('iausFairnessMinTotalService', 'IAUS fairness 最小服务数', DEFAULT_NOVA_CONFIG.iausFairnessMinTotalService, '近期服务样本达到该数量后启用 fairness', true),
+    ctx.NapCatConfig.text('proactiveWhitelistQQ', '主动发言 QQ 白名单', '[]', '允许 Nova 主动私聊的 QQ 号，JSON 字符串数组格式。例如 ["123456","789012"]。空白字符自动去除，空字符串丢弃，保持字符串格式不做数字转换，重复项自动去重', true),
     ctx.NapCatConfig.number('floodWindowMs', 'Flood 检测窗口毫秒', DEFAULT_NOVA_CONFIG.floodWindowMs, '短时间消息爆发检测窗口', true),
     ctx.NapCatConfig.number('floodMessageLimit', 'Flood 消息上限', DEFAULT_NOVA_CONFIG.floodMessageLimit, '窗口内会话消息超过该值触发安全沉默', true),
     ctx.NapCatConfig.number('userFloodMessageLimit', '用户刷屏上限', DEFAULT_NOVA_CONFIG.userFloodMessageLimit, '窗口内同一用户消息超过该值触发安全沉默', true),

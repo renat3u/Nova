@@ -87,7 +87,7 @@ function prepareText(text: string, maxReplyLength?: number): PreparedText {
     return { ok: false, error: 'send_text text is empty' };
   }
 
-  if (hasAliceIdentityResidue(trimmed)) {
+  if (hasNovaIdentityResidue(trimmed)) {
     return { ok: false, error: 'send_text text contains Alice identity residue' };
   }
 
@@ -109,7 +109,7 @@ function normalizeMaxReplyLength(maxReplyLength: number | undefined): number | u
   return Math.max(1, Math.trunc(maxReplyLength));
 }
 
-function hasAliceIdentityResidue(text: string): boolean {
+function hasNovaIdentityResidue(text: string): boolean {
   return /(?:我是|我叫|这里是|This is|I am|I'm|my name is)\s*Alice\b/i.test(text)
     || /\bAlice\s*(?:在这里|为你|should|will|can)/i.test(text);
 }

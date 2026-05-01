@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+dist-test/
 
 # Environment
 .env
@@ -21,3 +22,6 @@ Thumbs.db
 .idea/
 .npmrc
 .claude/
+
+# Other
+temp/

@@ -1,11 +1,17 @@
-// Alice baseline reference: personality/voices model adapted for Nova QQ runtime.
+
+//
+
+// and runtime/src/config.ts drift parameters.
 
 import { DEFAULT_PERSONALITY_VECTOR, projectPersonalityVector, type PersonalityVector, type VoiceId } from './vector';
 
 export interface PersonalityDriftOptions {
+
   enabled: boolean;
-  home: PersonalityVector;
+
   homeRegression: number;
+
+  learningRate: number;
 }
 
 export interface PersonalityFeedback {
@@ -14,31 +20,24 @@ export interface PersonalityFeedback {
 }
 
 export const DEFAULT_PERSONALITY_DRIFT_OPTIONS: PersonalityDriftOptions = {
-  enabled: false,
+  enabled: true,
   home: DEFAULT_PERSONALITY_VECTOR,
-  homeRegression: 0.02,
+  homeRegression: 0.002,
+  learningRate: 0.0001,
 };
 
-export function evolvePersonality(
-  current: PersonalityVector,
-  feedbacks: readonly PersonalityFeedback[],
-  options: PersonalityDriftOptions = DEFAULT_PERSONALITY_DRIFT_OPTIONS,
-): PersonalityVector {
-  const projectedCurrent = projectPersonalityVector(current);
-  if (!options.enabled) return projectedCurrent;
-
-  const next: PersonalityVector = { ...projectedCurrent };
-  for (const feedback of feedbacks) {
-    next[feedback.voice] += feedback.delta;
-  }
-
-  const home = projectPersonalityVector(options.home);
-  const gamma = clamp01(options.homeRegression);
+export function l2Distance(a: PersonalityVector, b: PersonalityVector): number {
+  let sumSq = 0;
   for (const voice of ['diligence', 'curiosity', 'sociability', 'caution'] as const) {
-    next[voice] -= gamma * (next[voice] - home[voice]);
+    const diff = a[voice] - b[voice];
+    sumSq += diff * diff;
   }
+  return Math.sqrt(sumSq);
+}
 
-  return projectPersonalityVector(next);
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
 }
 
 function clamp01(value: number): number {

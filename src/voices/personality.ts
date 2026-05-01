@@ -1,7 +1,8 @@
-// Alice baseline reference: personality/voices model adapted for Nova QQ runtime.
+
 
 export {
   DEFAULT_PERSONALITY_VECTOR,
+  IAUS_ACTIONS,
   PERSONALITY_MAX,
   PERSONALITY_MIN,
   VOICE_BY_INDEX,
@@ -12,7 +13,9 @@ export {
   personalityToWeights,
   projectPersonalityVector,
   serializePersonality,
+  voiceToIAUSAction,
   weightsToPersonality,
+  type IAUSAction,
   type PersonalityVector,
   type VoiceId,
   type VoiceWeights,
