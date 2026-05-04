@@ -14,6 +14,12 @@
 // ── Per-target record ──────────────────────────────────────────────────────
 
 interface ExploreTargetRecord {
+  targetId: string;
+  lastExploreSentMs: number;
+  exploreCount: number;
+  lastExploreReplied: boolean;
+  lastExploreResolvedMs: number;
+}
 
 export const EXPLORE_TARGET_COOLDOWN_MS = 4 * 3600 * 1000;
 

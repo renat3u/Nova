@@ -1,6 +1,17 @@
 import type { RelationshipVector } from '../world/relationship-vector';
 
 export interface GroupProfile {
+  groupId: string;
+  groupName: string;
+  topic: string | null;
+  atmosphere: string | null;
+  novaRole: string;
+  memberHighlights: string[];
+  crystallizedInterests: Record<string, CrystallizedInterest>;
+  activeHours: number[];
+  recentTopicDrift: string | null;
+  updatedMs: number;
+}
 
 export interface CrystallizedInterest {
   /** 兴趣标签 */

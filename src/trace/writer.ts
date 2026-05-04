@@ -61,6 +61,15 @@ export function buildTickTrace(plan: TickPlan): NovaTickTrace {
         expiresAt: plan.afterwardState.expiresAt,
       },
     } : {}),
+    ...(plan.decisionAgent ? { decisionAgent: plan.decisionAgent } : {}),
+    ...(plan.algorithmicGateAudit && plan.algorithmicGateAudit.length > 0 ? {
+      algorithmicGateAudit: plan.algorithmicGateAudit.map((g) => ({
+        allow: g.allow,
+        level: g.level,
+        reason: g.reason,
+        reasons: g.reasons,
+      })),
+    } : {}),
     createdMs: plan.createdMs,
   };
 }

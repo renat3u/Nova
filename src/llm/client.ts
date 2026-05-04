@@ -14,20 +14,42 @@ export interface LLMClient {
   generateProactive(input: NovaProactivePromptInput): Promise<NovaLLMResponse>;
 }
 
+const LLM_MAX_RETRIES = 2;
+const LLM_RETRY_DELAY_MS = 800;
+const LLM_RETRYABLE_CODES = new Set(['timeout', 'network_error']);
+
 export class OpenAICompatibleLLMClient implements LLMClient {
   constructor(private readonly config: LLMConfig) {}
 
   async generateReply(input: NovaPromptInput): Promise<NovaLLMResponse> {
-    return this.generate(buildNovaChatMessages(input));
+    return this.generateWithRetry(buildNovaChatMessages(input));
   }
 
   async generateProactive(input: NovaProactivePromptInput): Promise<NovaLLMResponse> {
-    return this.generate(buildNovaProactiveChatMessages(input));
+    return this.generateWithRetry(buildNovaProactiveChatMessages(input));
+  }
+
+  private async generateWithRetry(messages: ReturnType<typeof buildNovaChatMessages>): Promise<NovaLLMResponse> {
+    this.assertConfigured();
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
+      try {
+        return await this.generate(messages);
+      } catch (error) {
+        lastError = error;
+        if (error instanceof LLMGenerationError && LLM_RETRYABLE_CODES.has(error.code) && attempt < LLM_MAX_RETRIES) {
+          await sleep(LLM_RETRY_DELAY_MS * (attempt + 1));
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError;
   }
 
   private async generate(messages: ReturnType<typeof buildNovaChatMessages>): Promise<NovaLLMResponse> {
-    this.assertConfigured();
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs ?? 30_000);
 
@@ -114,4 +136,8 @@ function tryParseJsonObject(content: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

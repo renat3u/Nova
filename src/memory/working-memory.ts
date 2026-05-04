@@ -38,6 +38,8 @@ export interface WorkingMemoryItem {
   createdMs: number;
   updatedMs: number;
   sourceEventId?: string;
+  /** True if this memory is a shared experience between Nova and someone. */
+  shared?: boolean;
 }
 
 export interface WorkingMemoryCandidate {
@@ -117,6 +119,50 @@ export class WorkingMemory {
     this.prune();
     this.flush();
     return item;
+  }
+
+  getTopItems(limit: number, nowMs?: number): WorkingMemoryItem[] {
+    const now = nowMs ?? Date.now();
+    return Array.from(this.items.values())
+      .filter((item) => effectiveSalience(item, now) > INJECT_FLOOR)
+      .sort((a, b) => b.salience - a.salience || b.updatedMs - a.updatedMs)
+      .slice(0, limit);
+  }
+
+  addItem(content: string, salience: number): WorkingMemoryItem | null {
+    return this.addCandidate({ content, salience });
+  }
+
+  private decay(nowMs: number): void {
+    for (const [id, item] of this.items) {
+      const effective = effectiveSalience(item, nowMs);
+      if (effective <= INJECT_FLOOR) {
+        this.items.delete(id);
+      } else {
+        item.salience = effective;
+        item.updatedMs = nowMs;
+      }
+    }
+  }
+
+  flush(): void {
+    const upsert = this.db.prepare(`
+      INSERT OR REPLACE INTO working_memory (id, content, salience, created_ms, updated_ms, source_event_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const ids = new Set(Array.from(this.items.keys()));
+    const existing = this.db.prepare('SELECT id FROM working_memory').all() as { id: string }[];
+    const tx = this.db.transaction(() => {
+      for (const item of this.items.values()) {
+        upsert.run(item.id, item.content, item.salience, item.createdMs, item.updatedMs, item.sourceEventId ?? null);
+      }
+      for (const row of existing) {
+        if (!ids.has(row.id)) {
+          this.db.prepare('DELETE FROM working_memory WHERE id = ?').run(row.id);
+        }
+      }
+    });
+    tx();
   }
 
   private findSimilar(content: string, nowMs: number): WorkingMemoryItem | undefined {

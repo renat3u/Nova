@@ -1,9 +1,21 @@
-import type { IAUSScoringMode } from '../core/types';
+import type { GatewayMode, GuardrailMode, IAUSScoringMode } from '../core/types';
 
 export type NovaCoreMode = 'embedded';
 
 export interface NovaGroupConfig {
   enabled: boolean;
+}
+
+export interface NovaDecisionAgentConfig {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  timeoutMs?: number;
+  responseFormat: 'json_object';
+  failMode: 'fallback_algorithmic' | 'silence' | 'allow_reply_only';
 }
 
 export interface NovaPluginConfig {
@@ -48,6 +60,34 @@ export interface NovaPluginConfig {
   floodMessageLimit: number;
   userFloodMessageLimit: number;
   consecutiveSendFailureLimit: number;
+
+  /** Gateway mode: 'algorithmic' uses old gates; 'agent' uses LLM decision agent. */
+  gatewayMode: GatewayMode;
+
+  /** Decision agent LLM configuration, independent from the main reply LLM. */
+  decisionAgent: NovaDecisionAgentConfig;
+
+  /**
+   * Code guardrail mode for agent decisions.
+   * off: do not block agent decisions with old gates.
+   * soft: record guardrail violations but allow execution.
+   * hard: block decisions that violate guardrails.
+   * Default: off.
+   */
+  decisionGuardrails: GuardrailMode;
+
+  /**
+   * Whether ActLoop performs pre-send gate recheck for queued proactive actions.
+   * Default: false for agent gateway.
+   */
+  enablePreSendGuardrails: boolean;
+
+  /**
+   * Whether old algorithmic gates should still be evaluated for trace/audit.
+   * Does not block unless decisionGuardrails === 'hard'.
+   * Default: true.
+   */
+  auditAlgorithmicGates: boolean;
 }
 
 export interface NovaPluginStats {

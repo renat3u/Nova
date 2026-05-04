@@ -3,6 +3,7 @@ import type { SendTextOptions } from '../../act/types';
 import { extractMessageText } from '../../perception/message-text';
 import { normalizeMessageEvent, type OneBotMessageEventLike } from '../../perception/mapper';
 import { sendText } from '../actions/send-message';
+import { sendTextWithSticker } from '../../stickers/send-sticker';
 import type { NapCatPluginContext } from '../types';
 import { novaPluginState } from '../state';
 
@@ -127,7 +128,46 @@ async function executeActions(ctx: NapCatPluginContext, event: NovaMessageEvent,
         quoteReply: novaPluginState.config.quoteReply,
         maxReplyLength: novaPluginState.config.maxReplyLength,
       };
-      const result = await sendText(action.target, action.text, { ...options, ctx });
+
+      // If the action has a sticker, send text + sticker together
+      let result;
+      if (action.sticker) {
+        novaPluginState.loggerInstance?.info('Nova message handler sending text with sticker', {
+          emojiPackageId: action.sticker.emojiPackageId,
+          emojiId: action.sticker.emojiId,
+          summary: action.sticker.summary,
+        });
+        result = await sendTextWithSticker(
+          ctx,
+          {
+            chatType: action.target.chatType,
+            userId: action.target.userId,
+            groupId: action.target.groupId,
+            channelId: action.target.channelId,
+          },
+          action.text,
+          {
+            emojiPackageId: action.sticker.emojiPackageId,
+            emojiId: action.sticker.emojiId,
+            key: action.sticker.key,
+            summary: action.sticker.summary,
+          },
+        );
+        // Mark sticker as sent in the database
+        if (result.ok) {
+          novaPluginState.runtime?.markStickerSent(
+            action.sticker.emojiPackageId,
+            action.sticker.emojiId,
+          );
+        }
+      } else {
+        novaPluginState.loggerInstance?.debug('Nova message handler sending text only (no sticker)', {
+          hasStickerField: 'sticker' in action,
+          stickerValue: String((action as Record<string, unknown>).sticker),
+        });
+        result = await sendText(action.target, action.text, { ...options, ctx });
+      }
+
       novaPluginState.actionLog.recordSend(result);
       novaPluginState.runtime?.recordActionResult({
         actionType: result.actionType,

@@ -62,6 +62,25 @@ export interface ActionCandidate {
   afterwardSchedulingEffect?: AfterwardSchedulingEffect;
 }
 
+// ── Decision agent trace ───────────────────────────────────────────────────
+
+export interface DecisionAgentTrace {
+  enabled: boolean;
+  model?: string;
+  action?: string;
+  candidateId?: string;
+  targetId?: string | null;
+  generateText?: boolean;
+  responderIntent?: string;
+  reason?: string;
+  confidence?: number;
+  afterward?: string;
+  tags?: string[];
+  raw?: unknown;
+  error?: string;
+  fallbackUsed?: boolean;
+}
+
 // ── Tick plan ──────────────────────────────────────────────────────────────
 
 export interface TickPlan {
@@ -85,6 +104,10 @@ export interface TickPlan {
   silenceReason?: string;
   /** LLM afterward 状态快照（scheduled tick 中有 afterward 影响的 channel）。 */
   afterwardState?: TickAfterwardState;
+  /** Decision agent trace — populated when gatewayMode is 'agent'. */
+  decisionAgent?: DecisionAgentTrace;
+  /** Algorithmic gate audit results — recorded when auditAlgorithmicGates is true. */
+  algorithmicGateAudit?: GateDecision[];
   /** Timestamp when this plan was created. */
   createdMs: number;
 }
@@ -180,6 +203,31 @@ export function serializeTickPlan(plan: TickPlan): Record<string, unknown> {
     },
     silenceReason: plan.silenceReason ?? null,
     ...(plan.afterwardState ? { afterwardState: plan.afterwardState } : {}),
+    ...(plan.decisionAgent ? {
+      decisionAgent: {
+        enabled: plan.decisionAgent.enabled,
+        ...(plan.decisionAgent.model ? { model: plan.decisionAgent.model } : {}),
+        ...(plan.decisionAgent.action ? { action: plan.decisionAgent.action } : {}),
+        ...(plan.decisionAgent.candidateId ? { candidateId: plan.decisionAgent.candidateId } : {}),
+        ...(plan.decisionAgent.targetId !== undefined ? { targetId: plan.decisionAgent.targetId } : {}),
+        ...(plan.decisionAgent.generateText !== undefined ? { generateText: plan.decisionAgent.generateText } : {}),
+        ...(plan.decisionAgent.responderIntent ? { responderIntent: plan.decisionAgent.responderIntent } : {}),
+        ...(plan.decisionAgent.reason ? { reason: plan.decisionAgent.reason } : {}),
+        ...(plan.decisionAgent.confidence !== undefined ? { confidence: plan.decisionAgent.confidence } : {}),
+        ...(plan.decisionAgent.afterward ? { afterward: plan.decisionAgent.afterward } : {}),
+        ...(plan.decisionAgent.tags ? { tags: plan.decisionAgent.tags } : {}),
+        ...(plan.decisionAgent.error ? { error: plan.decisionAgent.error } : {}),
+        ...(plan.decisionAgent.fallbackUsed ? { fallbackUsed: plan.decisionAgent.fallbackUsed } : {}),
+      },
+    } : {}),
+    ...(plan.algorithmicGateAudit && plan.algorithmicGateAudit.length > 0 ? {
+      algorithmicGateAudit: plan.algorithmicGateAudit.map((g) => ({
+        allow: g.allow,
+        level: g.level,
+        reason: g.reason,
+        reasons: g.reasons,
+      })),
+    } : {}),
     createdMs: plan.createdMs,
   };
 }

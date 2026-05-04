@@ -1,6 +1,5 @@
-
 //
-
+//
 //   L_v = π_v × meanRelevance × φ_v(fatigue) × ψ_v(mood) + ε_v
 //
 // Where:
@@ -17,8 +16,32 @@ import { getPersonalityWeight, VOICES, type PersonalityVector, type VoiceId } fr
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface VoiceFatigueState {
+  recent: Array<{ voice: VoiceId; ms: number }>;
+  maxRecent: number;
+  voiceLastWonMs: Record<VoiceId, number>;
+}
 
+export interface LoudnessContext {
+  world: WorldModel;
+  pressure: AllPressures;
+  personality: PersonalityVector;
+  channelId?: string;
+  senderId?: string;
+  chatType?: 'private' | 'group';
+  directed?: boolean;
+  nowMs: number;
+  fatigueState: VoiceFatigueState;
   selfMood?: number;
+  noiseOverride?: number[];
+}
+
+export interface LoudnessResult {
+  loudness: Record<VoiceId, number>;
+  focalSets: Record<VoiceId, FocalSet>;
+  fatigue: Record<VoiceId, number>;
+  uncertainty: number;
+  moodPsi: Record<VoiceId, number>;
+}
 
 const VOICE_COOLDOWN_S = 300;
 
@@ -50,6 +73,14 @@ export function computeFatigue(
 /** Record that a voice won at this moment (starts fatigue ramp). */
 export function recordVoiceWin(state: VoiceFatigueState, voice: VoiceId, nowMs: number): void {
   state.voiceLastWonMs[voice] = nowMs;
+}
+
+/** Remember selected voice in fatigue state (for recent tracking). */
+export function rememberSelectedVoice(state: VoiceFatigueState, voice: VoiceId): void {
+  state.recent.push({ voice, ms: Date.now() });
+  if (state.recent.length > state.maxRecent) {
+    state.recent.shift();
+  }
 }
 
 const MOOD_DELTA = 0.3;

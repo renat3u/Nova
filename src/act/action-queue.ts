@@ -30,6 +30,14 @@ export interface QueuedAction {
   completedMs?: number;
   /** Error message if status is 'failed'. */
   error?: string;
+  /** Decision agent metadata, set when enqueued by agent gateway. */
+  decision?: {
+    action: string;
+    reason: string;
+    confidence: number;
+    responderIntent?: string;
+    candidateId?: string;
+  };
 }
 
 export class ActionQueue {

@@ -1,6 +1,5 @@
-
 //
-
+//
 // Nova uses an in-memory tracker so we don't need to alter the DB schema.
 // Mood decays exponentially toward 0 (neutral) and is nudged by interaction events.
 //
@@ -8,14 +7,30 @@
 // getCurrent() / setCurrent() / nudge() operating on full SelfMoodSnapshot
 // so that LLM-driven state writeback can persist and restore both dimensions.
 
-  private readonly HALF_LIFE_S = 3600;
-  private readonly DECAY_PER_SECOND: number;
+export type MoodEvent =
+  | 'positive_interaction'
+  | 'negative_interaction'
+  | 'silence_timeout'
+  | 'proactive_accepted'
+  | 'proactive_ignored';
+
+export interface SelfMoodSnapshot {
+  valence: number;
+  arousal: number;
+  updatedAt: number;
+}
+
+const NEUTRAL_AROUSAL = 0.5;
+
+export class MoodTracker {
+  private value: number;
+  private arousal: number;
+  private lastUpdateMs: number;
 
   constructor(initial: number = 0.05) {
     this.value = clamp(initial, -1, 1);
     this.arousal = NEUTRAL_AROUSAL;
     this.lastUpdateMs = Date.now();
-    this.DECAY_PER_SECOND = Math.LN2 / this.HALF_LIFE_S;
   }
 
   /** Current mood valence in [-1, 1]. Decay is applied before returning. */
@@ -102,24 +117,9 @@
 
   // ── private ──────────────────────────────────────────────────────────────
 
-  private applyDecay(nowMs?: number): void {
-    const now = nowMs ?? Date.now();
-    const elapsedS = (now - this.lastUpdateMs) / 1000;
-    if (elapsedS > 0) {
-      // Exponential decay toward 0: mood(t+dt) = mood(t) * exp(-λ·dt)
-      this.value = clamp(
-        this.value * Math.exp(-this.DECAY_PER_SECOND * elapsedS),
-        -1,
-        1,
-      );
-      // Arousal decays toward neutral (0.5)
-      this.arousal = clamp(
-        NEUTRAL_AROUSAL + (this.arousal - NEUTRAL_AROUSAL) * Math.exp(-this.DECAY_PER_SECOND * elapsedS),
-        0,
-        1,
-      );
-    }
-    this.lastUpdateMs = now;
+  private applyDecay(_nowMs?: number): void {
+    // Decay removed: Nova's mood should not drift toward neutral over time.
+    // Mood changes only through LLM-driven self_mood state writebacks.
   }
 
   private eventDelta(event: MoodEvent): number {
@@ -141,11 +141,11 @@
 }
 
 export function describeMood(value: number): string {
-  if (value < -0.5) return 'Feeling a bit down';
-  if (value < -0.15) return 'A little off';
-  if (value <= 0.15) return 'Feeling neutral';
-  if (value <= 0.5) return 'In a decent mood';
-  return 'Feeling good';
+  if (value < -0.5) return '低落 — 什么都不想做，缩着';
+  if (value < -0.15) return '略低 — 有点提不起劲，不太想主动';
+  if (value <= 0.15) return '平静 — 不好不坏，顺其自然';
+  if (value <= 0.5) return '不错 — 心情挺好的，愿意聊';
+  return '开心 — 特别有精神，什么都想分享';
 }
 
 function clamp(value: number, min: number, max: number): number {

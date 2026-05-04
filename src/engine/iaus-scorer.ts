@@ -806,6 +806,8 @@ function toPressureSnapshot(pressure: PressureSnapshot | AllPressures, nowMs: nu
         p4: (pressure as AllPressures).P4,
         p5: (pressure as AllPressures).P5,
         p6: (pressure as AllPressures).P6,
+        p7: (pressure as AllPressures).P7,
+        p8: (pressure as AllPressures).P8,
         pProspect: (pressure as AllPressures).P_prospect,
         api: (pressure as AllPressures).API,
         apiPeak: (pressure as AllPressures).API_peak,

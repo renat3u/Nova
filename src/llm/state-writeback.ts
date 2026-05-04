@@ -5,6 +5,7 @@ import type { MemoryService } from '../memory/memory-service';
 import type { PressureSnapshot } from '../pressure/aggregate';
 import type { NovaWorldRepository } from '../world/repository';
 import { createObservationBeat } from '../world/threads';
+import { isSharedExperience } from '../memory/memory-retrieval';
 import type { NovaAfterward, NovaStateUpdate } from './response-schema';
 
 export interface StateWritebackContext {
@@ -130,6 +131,12 @@ export function applyNovaStateUpdates(
         return;
       case 'afterward':
         applyAfterward(update, context, services, result);
+        return;
+      case 'send_sticker':
+        applySendSticker(update, context, services, result);
+        return;
+      case 'future_event':
+        applyFutureEvent(update, context, services, result);
         return;
       default:
         result.rejected.push({
@@ -338,15 +345,18 @@ function applyMemoryNote(
   });
 
   if (review.accepted) {
+    const isShared = isSharedExperience(content);
     const normalized: Record<string, unknown> = {
       content,
       salience: salience ?? 'context_default',
       reviewResult: review.reason,
+      shared: isShared,
     };
     if (review.fact) normalized.factType = review.fact.fact_type;
     if (reason) normalized.reason = reason;
 
     const effectParts: string[] = ['memory candidate accepted'];
+    if (isShared) effectParts.push('shared_experience');
     if (review.fact) effectParts.push(`fact_type=${review.fact.fact_type}`);
     effectParts.push(`review=${review.reason}`);
 
@@ -746,6 +756,169 @@ function afterwardTtl(value: NovaAfterward): number {
     case 'watching': return 7 * 60 * 1000;        // 7 min
     case 'cooling_down': return 20 * 60 * 1000;   // 20 min
     default: return 5 * 60 * 1000;
+  }
+}
+
+// ── send_sticker handler ───────────────────────────────────────────────────
+
+function applySendSticker(
+  update: Record<string, unknown>,
+  _context: StateWritebackContext,
+  _services: StateWritebackServices,
+  result: StateWritebackResult,
+): void {
+  if (typeof update.emoji_package_id !== 'number' || !Number.isFinite(update.emoji_package_id)) {
+    result.rejected.push({
+      type: 'send_sticker',
+      reason: 'invalid_emoji_package_id',
+      raw: update,
+    });
+    return;
+  }
+  if (typeof update.emoji_id !== 'string' || update.emoji_id.length === 0) {
+    result.rejected.push({
+      type: 'send_sticker',
+      reason: 'invalid_emoji_id',
+      raw: update,
+    });
+    return;
+  }
+  if (typeof update.key !== 'string' || update.key.length === 0) {
+    result.rejected.push({
+      type: 'send_sticker',
+      reason: 'invalid_sticker_key',
+      raw: update,
+    });
+    return;
+  }
+
+  const reason = typeof update.reason === 'string' && update.reason.trim().length > 0
+    ? update.reason.trim().slice(0, MAX_REASON_LENGTH)
+    : undefined;
+  if (reason && LEAK_PATTERN.test(reason)) {
+    result.rejected.push({
+      type: 'send_sticker',
+      reason: 'reason_prompt_leak',
+      raw: update,
+    });
+    return;
+  }
+
+  const summary = typeof update.summary === 'string' && update.summary.trim().length > 0
+    ? update.summary.trim().slice(0, 100)
+    : undefined;
+
+  const normalized: Record<string, unknown> = {
+    emoji_package_id: update.emoji_package_id,
+    emoji_id: update.emoji_id,
+    key: update.key,
+  };
+  if (summary) normalized.summary = summary;
+  if (reason) normalized.reason = reason;
+
+  result.accepted.push({
+    type: 'send_sticker',
+    normalized,
+    effect: `send_sticker passed through: package=${update.emoji_package_id}, emoji=${update.emoji_id}${summary ? `, summary="${summary}"` : ''}`,
+  });
+}
+
+// ── future_event handler ────────────────────────────────────────────────────
+
+function applyFutureEvent(
+  update: Record<string, unknown>,
+  context: StateWritebackContext,
+  services: StateWritebackServices,
+  result: StateWritebackResult,
+): void {
+  if (typeof update.event !== 'string' || update.event.trim().length === 0) {
+    result.rejected.push({
+      type: 'future_event',
+      reason: 'invalid_future_event_event',
+      raw: update,
+    });
+    return;
+  }
+  const event = update.event.trim().slice(0, 200);
+
+  if (typeof update.dateDescription !== 'string' || update.dateDescription.trim().length === 0) {
+    result.rejected.push({
+      type: 'future_event',
+      reason: 'invalid_future_event_date_description',
+      raw: update,
+    });
+    return;
+  }
+  const dateDescription = update.dateDescription.trim().slice(0, 100);
+
+  if (LEAK_PATTERN.test(event) || LEAK_PATTERN.test(dateDescription)) {
+    result.rejected.push({
+      type: 'future_event',
+      reason: 'content_prompt_leak',
+      raw: update,
+    });
+    return;
+  }
+
+  const date = typeof update.date === 'string' && update.date.trim().length > 0
+    ? update.date.trim().slice(0, 20)
+    : undefined;
+
+  const targetId = typeof update.targetId === 'string' && update.targetId.trim().length > 0
+    ? update.targetId.trim()
+    : (context.contactId ?? undefined);
+
+  if (!targetId) {
+    result.rejected.push({
+      type: 'future_event',
+      reason: 'missing_target_id',
+      raw: update,
+    });
+    return;
+  }
+
+  const reason = validateReasonString(update.reason, 'future_event', result, update);
+  if (reason === false) return;
+
+  // Persist as a fact with type 'future_event'
+  const content = JSON.stringify({
+    type: 'future_event',
+    event,
+    dateDescription,
+    date,
+    targetId,
+    status: 'upcoming',
+    mentionedAtMs: context.nowMs,
+  });
+
+  const review = services.memoryService.reviewMemoryCandidate(content, {
+    event: context.event,
+    source: 'llm_state_update',
+    salience: 0.6,
+    nowMs: context.nowMs,
+  });
+
+  if (review.accepted) {
+    const normalized: Record<string, unknown> = {
+      event,
+      dateDescription,
+      targetId,
+      status: 'upcoming',
+    };
+    if (date) normalized.date = date;
+    if (reason) normalized.reason = reason;
+
+    result.accepted.push({
+      type: 'future_event',
+      normalized,
+      effect: `future_event recorded: "${event}" (${dateDescription}) for ${targetId}`,
+    });
+  } else {
+    result.rejected.push({
+      type: 'future_event',
+      reason: `future_event_review_rejected:${review.reason}`,
+      raw: update,
+    });
   }
 }
 

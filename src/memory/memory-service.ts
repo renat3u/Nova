@@ -8,6 +8,7 @@ import {
   MAX_ENTRY_LENGTH,
   SIMILARITY_THRESHOLD,
 } from './working-memory';
+import { retrieveRelevantMemories, formatMemoriesForPrompt, type MemoryHit, type RetrieveRelevantParams } from './memory-retrieval';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 类型
@@ -27,8 +28,17 @@ export interface MemoryReviewResult {
   workingItem?: WorkingMemoryItem;
 }
 
-export interface EngagementFeedback {
+export interface RelevantFactsOptions {
+  text?: string;
+  subjectId?: string;
+  limit?: number;
+}
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MemoryService
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class MemoryService {
   private turnWriteCount = 0;
 
   constructor(
@@ -51,6 +61,81 @@ export interface EngagementFeedback {
   getWorkingMemory(limit = INJECT_LIMIT): WorkingMemoryItem[] {
     return this.workingMemory.getTopItems(limit);
   }
+
+  getRelevantFacts(options: RelevantFactsOptions): FactAttrs[] {
+    return this.longTermMemory.getRelevantFacts({
+      text: options.text,
+      subjectId: options.subjectId,
+      limit: options.limit ?? 8,
+    });
+  }
+
+  /**
+   * Retrieve the most relevant long-term memories for the current conversation
+   * context, using multi-factor scoring (relevance + salience + recency).
+   *
+   * Shared experiences (共同经历) are prioritized and surfaced first.
+   */
+  retrieveRelevant(params: Omit<RetrieveRelevantParams, 'longTermFacts' | 'workingMemory'> & { limit?: number }): MemoryHit[] {
+    const workingMemory = this.workingMemory.getTopItems(10).map((item) => item.content);
+    const longTermFacts = this.longTermMemory.getRelevantFacts({
+      text: params.currentText,
+      subjectId: params.senderId,
+      limit: 20,
+    });
+    return retrieveRelevantMemories({
+      ...params,
+      longTermFacts,
+      workingMemory,
+    });
+  }
+
+  /**
+   * Retrieve and format memories for prompt injection, with layered display:
+   * related (shared experiences) → recent → other.
+   */
+  retrieveForPrompt(params: Omit<RetrieveRelevantParams, 'longTermFacts' | 'workingMemory'> & { limit?: number }): {
+    related: string[];
+    recent: string[];
+    other: string[];
+  } {
+    const hits = this.retrieveRelevant(params);
+    return formatMemoriesForPrompt(hits);
+  }
+
+  reviewMemoryCandidate(
+    content: string,
+    context: MemoryCandidateContext,
+  ): MemoryReviewResult {
+    const summary = summarizeSignificantContent(content);
+    if (!summary) {
+      return { accepted: false, reason: 'empty_content' };
+    }
+
+    // Check similarity with existing working memory items to avoid duplicates
+    const existing = this.workingMemory.getTopItems(20);
+    for (const item of existing) {
+      const similarity = jaccardSimilarity(summary, item.content);
+      if (similarity >= SIMILARITY_THRESHOLD) {
+        return { accepted: false, reason: 'duplicate_content' };
+      }
+    }
+
+    // Add to working memory
+    const salience = context.salience ?? 0.5;
+    const item = this.workingMemory.addItem(summary, salience);
+    if (item) {
+      this.turnWriteCount++;
+      return { accepted: true, reason: 'added_to_working_memory', workingItem: item };
+    }
+
+    return { accepted: false, reason: 'working_memory_full' };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════════════════
 
 function jaccardSimilarity(a: string, b: string): number {
   const sa = charBigrams(a);
@@ -80,9 +165,4 @@ function summarizeSignificantContent(text: string): string | null {
   const compact = text.replace(/\s+/g, ' ').trim();
   if (compact.length <= MAX_ENTRY_LENGTH) return compact;
   return compact.slice(0, MAX_ENTRY_LENGTH - 1).trimEnd() + '…';
-}
-
-function truncateForFeedback(text: string, maxLen = 50): string {
-  const compact = text.replace(/\s+/g, ' ').trim();
-  return compact.length <= maxLen ? compact : `${compact.slice(0, maxLen - 1)}…`;
 }

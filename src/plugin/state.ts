@@ -10,7 +10,7 @@ import { NovaScheduler } from '../core/scheduler';
 import type { NovaRuntimeConfig } from '../core/types';
 import { MessageDedupe } from '../perception/dedupe';
 import { InMemoryDirectedState } from '../perception/directed';
-import { createDefaultConfig, mergePluginConfig, normalizePluginConfig } from './config';
+import { createDefaultConfig, mergePluginConfig, normalizeGatewayMode, normalizeGuardrailMode, normalizePluginConfig } from './config';
 import { sendText } from './actions/send-message';
 import type { NovaGroupConfig, NovaPluginConfig, NovaPluginStats } from './types';
 
@@ -146,19 +146,54 @@ class NovaPluginState {
     if (!this.ctx?.configPath) return createDefaultConfig(this.ctx?.dataPath);
 
     try {
+      let config: NovaPluginConfig;
       if (!fs.existsSync(this.ctx.configPath)) {
-        const config = createDefaultConfig(this.ctx.dataPath);
+        config = createDefaultConfig(this.ctx.dataPath);
         this.writeConfig(config);
-        return config;
+      } else {
+        const raw = JSON.parse(fs.readFileSync(this.ctx.configPath, 'utf-8')) as unknown;
+        config = normalizePluginConfig(raw, this.ctx.dataPath);
       }
-
-      const raw = JSON.parse(fs.readFileSync(this.ctx.configPath, 'utf-8')) as unknown;
-      return normalizePluginConfig(raw, this.ctx.dataPath);
+      // Environment variable overrides for decision agent (lowest priority:
+      // code defaults < config file < env vars).
+      return this.applyEnvOverrides(config);
     } catch (error) {
       this.lastError = stringifyError(error);
       this.ctx.logger.error('Nova config load failed; using defaults:', error);
       return createDefaultConfig(this.ctx.dataPath);
     }
+  }
+
+  /**
+   * Override decision agent config with environment variables when set.
+   * Env vars take highest priority for deployment flexibility.
+   */
+  private applyEnvOverrides(config: NovaPluginConfig): NovaPluginConfig {
+    const envGatewayMode = process.env.NOVA_GATEWAY_MODE;
+    const envDecisionBaseUrl = process.env.NOVA_DECISION_LLM_BASE_URL;
+    const envDecisionApiKey = process.env.NOVA_DECISION_LLM_API_KEY;
+    const envDecisionModel = process.env.NOVA_DECISION_LLM_MODEL;
+    const envGuardrails = process.env.NOVA_DECISION_GUARDRAILS;
+    const envPreSendGuardrails = process.env.NOVA_ENABLE_PRE_SEND_GUARDRAILS;
+
+    if (!envGatewayMode && !envDecisionBaseUrl && !envDecisionApiKey && !envDecisionModel && !envGuardrails && !envPreSendGuardrails) {
+      return config;
+    }
+
+    return {
+      ...config,
+      ...(envGatewayMode ? { gatewayMode: normalizeGatewayMode(envGatewayMode) } : {}),
+      ...(envDecisionBaseUrl || envDecisionApiKey || envDecisionModel ? {
+        decisionAgent: {
+          ...config.decisionAgent,
+          ...(envDecisionBaseUrl ? { baseUrl: envDecisionBaseUrl } : {}),
+          ...(envDecisionApiKey ? { apiKey: envDecisionApiKey } : {}),
+          ...(envDecisionModel ? { model: envDecisionModel } : {}),
+        },
+      } : {}),
+      ...(envGuardrails ? { decisionGuardrails: normalizeGuardrailMode(envGuardrails) } : {}),
+      ...(envPreSendGuardrails !== undefined ? { enablePreSendGuardrails: envPreSendGuardrails === 'true' } : {}),
+    };
   }
 
   private saveConfig(): void {
@@ -255,6 +290,21 @@ class NovaPluginState {
       floodMessageLimit: config.floodMessageLimit,
       userFloodMessageLimit: config.userFloodMessageLimit,
       consecutiveSendFailureLimit: config.consecutiveSendFailureLimit,
+      gatewayMode: config.gatewayMode,
+      decisionAgent: {
+        enabled: config.decisionAgent.enabled,
+        baseUrl: config.decisionAgent.baseUrl,
+        apiKey: config.decisionAgent.apiKey,
+        model: config.decisionAgent.model,
+        temperature: config.decisionAgent.temperature,
+        maxTokens: config.decisionAgent.maxTokens,
+        timeoutMs: config.decisionAgent.timeoutMs,
+        responseFormat: config.decisionAgent.responseFormat,
+        failMode: config.decisionAgent.failMode,
+      },
+      decisionGuardrails: config.decisionGuardrails,
+      enablePreSendGuardrails: config.enablePreSendGuardrails,
+      auditAlgorithmicGates: config.auditAlgorithmicGates,
     };
   }
 

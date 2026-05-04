@@ -1,7 +1,7 @@
 import type { NovaMessageEvent } from '../core/types';
 import type { DirectedState } from './directed';
 import { determineDirected } from './directed';
-import { extractMessageText } from './message-text';
+import { extractMessageText, extractStickers } from './message-text';
 
 export interface OneBotSenderLike {
   user_id?: string | number;
@@ -56,6 +56,7 @@ export function normalizeMessageEvent(
   const messageId = `qq:message:${String(rawMessageId)}`;
   const timestamp = normalizeTimestamp(rawEvent.time);
   const textParts = extractMessageText(rawEvent.message, rawEvent.raw_message, options.selfId);
+  const stickerParts = extractStickers(rawEvent.message);
   const isSelf = options.selfId !== undefined && senderQQ === options.selfId;
   const repliedToSelf = options.repliedToSelf ?? Boolean(textParts.replyToMessageId && rawReplyMentionsSelf(rawEvent, options.selfId));
   const isDirected = determineDirected(
@@ -91,6 +92,16 @@ export function normalizeMessageEvent(
     repliedToSelf,
     isDirected,
     ...(textParts.replyToMessageId === undefined ? {} : { replyToMessageId: `qq:message:${textParts.replyToMessageId}` }),
+    ...(textParts.mentionedContactQQs && textParts.mentionedContactQQs.length > 0
+      ? { mentionedContactIds: [...new Set(textParts.mentionedContactQQs)].map((qq) => `qq:user:${qq}`) }
+      : {}),
+    ...(stickerParts.length > 0 ? { stickers: stickerParts.map((s) => ({
+      emojiPackageId: s.emojiPackageId,
+      emojiId: s.emojiId,
+      key: s.key,
+      ...(s.summary === undefined ? {} : { summary: s.summary }),
+      ...(s.url === undefined ? {} : { url: s.url }),
+    })) } : {}),
   };
 }
 

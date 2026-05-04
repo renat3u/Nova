@@ -7,6 +7,7 @@
 
 import type { AllPressures } from '../pressure/aggregate';
 import type { WorldModel } from '../world/model';
+import type { NovaWorldRepository } from '../world/repository';
 
 export interface SituationBriefingOptions {
   /** Current channel id (for anti-bombing check). */
@@ -15,6 +16,8 @@ export interface SituationBriefingOptions {
   maxEntityLines?: number;
   /** LLM-set channel afterward state (Step 8) for anti-bombing window adjustment. */
   afterward?: string;
+  /** Repository for reading stored sentiment signal. */
+  repository?: NovaWorldRepository;
 }
 
 /**
@@ -59,6 +62,36 @@ export function buildSituationBriefing(
         lines.push(baseMsg + " You're observing this channel.");
       } else {
         lines.push(baseMsg);
+      }
+    }
+  }
+
+  // P7 — Loneliness
+  if (pressure.P7 > 1.5) {
+    lines.push("你有点孤单——周围安静太久了。");
+  } else if (pressure.P7 > 0.5) {
+    lines.push("时不时觉得有点空，但还好。");
+  }
+
+  // P8 — Fear of being forgotten
+  if (pressure.P8 > 1.0) {
+    lines.push("你在想某些人是不是忘了你。不是焦虑，只是一闪而过的念头。");
+  } else if (pressure.P8 > 0.3) {
+    lines.push("有一点点不确定——有人没回你。但这很正常。");
+  }
+
+  // Emotional contagion: check last detected sentiment signal
+  if (options.channelId && options.repository) {
+    const sentimentState = options.repository.getRuntimeState<{
+      valence: number;
+      confidence: number;
+      updatedAt: number;
+    }>(`last_sentiment:${options.channelId}`);
+    if (sentimentState && (nowMs - sentimentState.updatedAt) < 5 * 60 * 1000) {
+      if (sentimentState.valence < -0.3 && sentimentState.confidence > 0.5) {
+        lines.push("对方似乎心情不太好——Nova 的情绪被轻轻往下拉了一点。");
+      } else if (sentimentState.valence > 0.3 && sentimentState.confidence > 0.5) {
+        lines.push("对方似乎心情很好——Nova 也感到了一点轻快的暖意。");
       }
     }
   }

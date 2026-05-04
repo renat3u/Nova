@@ -15,10 +15,18 @@ export type DesireType =
   | 'reconnect'
   | 'resolve_thread'
   | 'reduce_backlog'
-  | 'explore';
+  | 'explore'
+  | 'seek_presence'
+  | 'reach_out';
 
 export interface Desire {
   type: DesireType;
+  urgency: string;
+  pressureValue: number;
+  targetId: string | null;
+  source: string;
+  reason: string;
+}
 
 export const DESIRE_THRESHOLDS: Record<DesireType, number> = {
   fulfill_duty: 0.2,
@@ -26,6 +34,8 @@ export const DESIRE_THRESHOLDS: Record<DesireType, number> = {
   resolve_thread: 0.4,
   reduce_backlog: 0.5,
   explore: 0.3,
+  seek_presence: 0.2,
+  reach_out: 0.15,
 };
 
 /** Maximum number of desires generated per tick. */
@@ -38,7 +48,7 @@ export const MAX_DESIRES = 10;
  */
 const DESIRE_PRESSURE_MAP: Array<{
   type: DesireType;
-  pressureKey: 'p1' | 'p2' | 'p3' | 'p4' | 'p5' | 'p6' | 'pProspect';
+  pressureKey: 'p1' | 'p2' | 'p3' | 'p4' | 'p5' | 'p6' | 'p7' | 'p8' | 'pProspect';
   contributionDim: string;
 }> = [
   { type: 'reduce_backlog', pressureKey: 'p1', contributionDim: 'P1' },
@@ -46,6 +56,8 @@ const DESIRE_PRESSURE_MAP: Array<{
   { type: 'resolve_thread', pressureKey: 'p4', contributionDim: 'P4' },
   { type: 'fulfill_duty', pressureKey: 'p5', contributionDim: 'P5' },
   { type: 'explore', pressureKey: 'p6', contributionDim: 'P6' },
+  { type: 'seek_presence', pressureKey: 'p7', contributionDim: 'P7' },
+  { type: 'reach_out', pressureKey: 'p8', contributionDim: 'P8' },
 ];
 
 /** Urgency band thresholds (multiples of the desire threshold). */
@@ -111,6 +123,18 @@ export function deriveDesires(params: {
   unresolvedThreads?: ThreadAttrs[];
   /** 信息缺口上下文 (Step 15)，用于生成额外的 explore desire */
   exploreGapCtx?: ExploreGapContext;
+  /** Optional closeness getter for adjusting reconnect thresholds. */
+  getCloseness?: (targetId: string) => number;
+  /** Upcoming events for reminder desires. */
+  upcomingEvents?: Array<{
+    id: string;
+    event: string;
+    dateDescription: string;
+    date?: string;
+    targetId: string;
+    mentionedAtMs: number;
+    status: string;
+  }>;
 }): Desire[] {
   const { pressure, reason, nowMs } = params;
 
@@ -122,11 +146,22 @@ export function deriveDesires(params: {
   const desires: Desire[] = [];
 
   for (const mapping of DESIRE_PRESSURE_MAP) {
-    const threshold = DESIRE_THRESHOLDS[mapping.type];
-    const rawValue = pressure[mapping.pressureKey];
-    if (rawValue <= threshold) continue;
+    let threshold = DESIRE_THRESHOLDS[mapping.type];
+    const rawValue = pressure[mapping.pressureKey] ?? 0;
 
     const targetId = topContributor(pressure.contributions, mapping.contributionDim);
+
+    // ── Closeness-adjusted reconnect threshold ─────────────────────────
+    // close 以上关系：reconnect desire 阈值降低 30%
+    if (mapping.type === 'reconnect' && targetId && params.getCloseness) {
+      const closeness = params.getCloseness(targetId);
+      if (closeness >= 0.55) {
+        threshold = threshold * 0.7;
+      }
+    }
+
+    if (rawValue <= threshold) continue;
+
     const urgency = computeUrgency(rawValue, threshold);
 
     desires.push({
@@ -153,6 +188,13 @@ export function deriveDesires(params: {
   if (params.exploreGapCtx && nowMs !== undefined) {
     const gapDesires = deriveExploreGapDesires(params.exploreGapCtx, nowMs);
     desires.push(...gapDesires);
+  }
+
+  // ── Future event reminder scanning ─────────────────────────────────────
+  // 从 upcoming future_event facts 中生成提醒 desire。
+  if (params.upcomingEvents && params.upcomingEvents.length > 0 && nowMs !== undefined) {
+    const eventDesires = deriveEventReminderDesires(params.upcomingEvents, nowMs);
+    desires.push(...eventDesires);
   }
 
   // Sort by pressure value descending so the strongest desires are first.
@@ -263,6 +305,74 @@ function deriveExploreGapDesires(
         reason: `explore: group_topic_drift group=${group.groupId} drift="${group.topicDrift.slice(0, 60)}"`,
       });
     }
+  }
+
+  return desires;
+}
+
+/**
+ * 从即将到来的 future_event facts 生成提醒 desire。
+ *
+ * 时间距离决定紧迫度：
+ *   - 1 天内 → urgency=high → fulfill_duty desire
+ *   - 3 天内 → urgency=medium → reconnect 或 fulfill_duty
+ *   - 7 天内 → urgency=low → explore
+ */
+function deriveEventReminderDesires(
+  events: Array<{
+    id: string;
+    event: string;
+    dateDescription: string;
+    date?: string;
+    targetId: string;
+    mentionedAtMs: number;
+    status: string;
+  }>,
+  nowMs: number,
+): Desire[] {
+  const desires: Desire[] = [];
+  const ONE_DAY_MS = 24 * 3600 * 1000;
+
+  for (const evt of events) {
+    const ageMs = nowMs - evt.mentionedAtMs;
+
+    // Approximate: if dateDescription mentions "明天" or "后天", it's close
+    const isImminent = /明天|后天|今天|马上|快要/.test(evt.dateDescription);
+    const isNear = /后天|下周|几天后/.test(evt.dateDescription);
+    const isFar = /下个月|之后|以后/.test(evt.dateDescription);
+
+    let urgency: 'low' | 'medium' | 'high';
+    let pressureValue: number;
+    let desireType: DesireType;
+
+    if (isImminent) {
+      urgency = 'high';
+      pressureValue = 0.5;
+      desireType = 'fulfill_duty';
+    } else if (isNear) {
+      urgency = 'medium';
+      pressureValue = 0.3;
+      desireType = 'reconnect';
+    } else if (isFar) {
+      urgency = 'low';
+      pressureValue = 0.15;
+      desireType = 'explore';
+    } else {
+      // Default: if event was mentioned long ago or date unclear
+      if (ageMs > ONE_DAY_MS * 30) continue; // skip events older than 30 days
+      urgency = 'low';
+      pressureValue = 0.1;
+      desireType = 'explore';
+    }
+
+    desires.push({
+      type: desireType,
+      urgency,
+      pressureValue,
+      targetId: evt.targetId,
+      source: 'future_event',
+      reason: `future_event: ${evt.event} (${evt.dateDescription}), target=${evt.targetId}, event_id=${evt.id}`,
+    });
   }
 
   return desires;

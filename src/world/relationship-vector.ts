@@ -185,6 +185,41 @@ export function applyNovaActionRelationshipUpdate(
   };
 }
 
+// ── Closeness computation ────────────────────────────────────────────────────
+
+export type ClosenessLevel = 'stranger' | 'acquaintance' | 'familiar' | 'close' | 'intimate';
+
+/**
+ * Compute a single closeness score from the relationship vector.
+ * familiarity has highest weight (frequent interaction → closeness),
+ * affection + trust reinforce it.
+ */
+export function computeCloseness(v: RelationshipVector): number {
+  const raw =
+    v.familiarity * 0.4 +
+    v.affection * 0.25 +
+    v.trust * 0.2 +
+    v.respect * 0.15;
+  return clamp01(raw);
+}
+
+/**
+ * Classify the closeness score into a discrete level for prompt injection
+ * and gate adjustments.
+ */
+export function classifyCloseness(closeness: number): ClosenessLevel {
+  if (closeness < 0.1) return 'stranger';
+  if (closeness < 0.3) return 'acquaintance';
+  if (closeness < 0.55) return 'familiar';
+  if (closeness < 0.8) return 'close';
+  return 'intimate';
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
 export function describeRelationshipCloseness(v: RelationshipVector): string {
   const familiarity = v.familiarity;
   const warmth = Math.max(v.affection, Math.min(v.trust, v.respect));

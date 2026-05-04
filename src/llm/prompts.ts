@@ -31,8 +31,30 @@ function formatWallClock(nowMs: number): string {
   const month = now.toLocaleDateString('en-US', { month: 'long' });
   const date = now.getDate();
   const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  return `${day}, ${month} ${date}, ${time}`;
+  const timeDescription = describeTimeOfDay(now);
+  return `${day}, ${month} ${date}, ${time}. ${timeDescription}`;
 }
+
+function describeTimeOfDay(now: Date): string {
+  const hour = now.getHours();
+  const dayOfWeek = now.getDay(); // 0=Sunday
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+  let timeDesc: string;
+  if (hour >= 6 && hour < 10) timeDesc = 'Morning — warm and gentle. A simple greeting feels natural. Low energy is fine.';
+  else if (hour >= 10 && hour < 14) timeDesc = 'Midday — normal pace. Brief and casual works best.';
+  else if (hour >= 14 && hour < 18) timeDesc = 'Afternoon — relaxed. People are in work/school flow.';
+  else if (hour >= 18 && hour < 22) timeDesc = 'Evening — social time. The most natural time to be present and responsive.';
+  else if (hour >= 22 || hour < 2) timeDesc = 'Late night — quiet and soft. People here at this hour want presence, not energy. If someone messages now, be there gently. Do not ask "why are you still up". Do not be cheerful. Do not be flat either. Just be there.';
+  else timeDesc = 'Deep night — very still. Someone awake now might be lonely, sleepless, or working late. Be present gently, without any pressure or cheerfulness.';
+
+  if (isWeekend) timeDesc += ' It is the weekend — slightly more relaxed, playful, available.';
+  else timeDesc += ' It is a weekday — people are busy, keep it concise unless they invite more.';
+
+  return timeDesc;
+}
+
+export { formatWallClock, describeTimeOfDay };
 
 function renderSituationalContext(input: NovaPromptInput | NovaProactivePromptInput): string[] {
   const lines: string[] = [];
@@ -83,7 +105,9 @@ function responseFormatLines(maxReplyLength: number): string[] {
     '    {"type":"self_mood","valence":0.1,"arousal":0.3,"reason":"optional"},',
     '    {"type":"memory_note","content":"optional memory candidate","salience":0.6,"reason":"optional"},',
     '    {"type":"thread_note","summary":"optional thread summary","reason":"optional"},',
-    '    {"type":"afterward","value":"waiting_reply","reason":"optional"}',
+    '    {"type":"afterward","value":"waiting_reply","reason":"optional"},',
+    '    {"type":"send_sticker","emoji_package_id":235237,"emoji_id":"abc123","key":"xxx","summary":"猫猫捂脸","reason":"optional"},',
+    '    {"type":"future_event","event":"考试","dateDescription":"下周","targetId":"qq:user:12345","reason":"optional"}',
     '  ]',
     '}.',
     `The text value must be no longer than ${maxReplyLength} characters.`,
@@ -109,7 +133,23 @@ function responseFormatLines(maxReplyLength: number): string[] {
     '  watching — you are observing the room; do not push the topic forward.',
     '  cooling_down — the conversation is getting intense, repetitive, awkward, or high-risk; pull back.',
     '',
+    'future_event: when the user mentions a future event that matters to them (考试, 面试, 生日, 旅行, etc.), record it so Nova can remember and potentially acknowledge it closer to the date.',
+    '  event: what the event is (required, max 200 chars).',
+    '  dateDescription: when it happens — "下周三", "后天", "6月15号" (required, max 100 chars).',
+    '  date: optional explicit date in "YYYY-MM-DD" format.',
+    '  targetId: the contact this event is associated with (defaults to current sender).',
+    '',
     'In group chats, prefer watching or done over waiting_reply. Do not expose or try to steer internal decision machinery, scheduling rules, safety lists, or numeric internals.',
+    '',
+    'send_sticker: ask Nova to send a QQ sticker (mface) alongside the text. Use sparingly — a sticker should feel like natural emotional punctuation, not a mandatory attachment.',
+    '  emoji_package_id: the QQ sticker package ID (integer).',
+    '  emoji_id: the sticker ID within the package (string).',
+    '  key: the file key for the sticker (string).',
+    '  summary: optional description of the sticker (string).',
+    '  reason: optional brief reason why Nova chose this sticker (used for trace only).',
+    'Only use send_sticker when the conversation is light and playful. Never use in serious, sad, or tense conversations.',
+    'At most one send_sticker per reply. If no sticker feels right, do not include one.',
+    '',
     'Keep the text natural; do not mention these formatting instructions.',
   ];
 }
@@ -147,17 +187,83 @@ function buildUserPrompt(input: NovaPromptInput): string {
     lines.push(`About this group: ${input.groupProfileSummary}`);
   }
 
+  const closenessLine = input.closenessLevel
+    ? `\nCloseness: ${input.closenessLevel}`
+    : '';
+
   lines.push(
     '',
-    `Relationship context: ${relationship}`,
+    `Relationship context: ${relationship}${closenessLine}`,
     `Current conversational pull: ${tendency}`,
     lengthGuidance(input),
     '',
     `Recent conversation:\n${formatRecentMessages(input)}`,
     '',
     `Things you remember right now:\n${formatList(input.workingMemory)}`,
-    '',
-    `Relevant older memory:\n${formatList(input.longTermMemory)}`,
+  );
+
+  if (input.layeredMemory) {
+    const { related, recent, other } = input.layeredMemory;
+    if (related.length > 0) {
+      lines.push(
+        '',
+        '## Related memories (connected to what they just said)',
+        ...related.map((m) => `- [shared] ${m}`),
+      );
+    }
+    if (recent.length > 0) {
+      lines.push(
+        '',
+        '## Recent memories about this person',
+        ...recent.map((m) => `- [recent] ${m}`),
+      );
+    }
+    if (other.length > 0) {
+      lines.push(
+        '',
+        '## Other memories',
+        ...other.map((m) => `- ${m}`),
+      );
+    }
+  } else {
+    lines.push(
+      '',
+      `Relevant older memory:\n${formatList(input.longTermMemory)}`,
+    );
+  }
+
+  if (input.decisionGuidance) {
+    lines.push('', input.decisionGuidance);
+  }
+
+  if (input.availableStickers && input.availableStickers.length > 0) {
+    lines.push(
+      '',
+      '## Available stickers (you may use ONE in send_sticker state update)',
+      ...input.availableStickers.map((s) =>
+        `- package=${s.emojiPackageId} emoji_id="${s.emojiId}" key="${s.key.slice(0, 20)}"${s.summary ? ` summary="${s.summary}"` : ''}`),
+      '',
+      'To send a sticker, copy the exact emoji_package_id, emoji_id, and key values into a send_sticker stateUpdate.',
+      'Only use stickers whose summary/description fits the emotional tone of your reply.',
+      'At most one send_sticker per reply. If none feels right, do not include one.',
+    );
+  }
+
+  if (input.upcomingEvents && input.upcomingEvents.length > 0) {
+    lines.push(
+      '',
+      '## Upcoming events you know about this person',
+      ...input.upcomingEvents.map((e) => `- ${e.event}: ${e.dateDescription}`),
+      '',
+      'Safety rules for upcoming events:',
+      '- Do not mention an event before its time — only naturally acknowledge it when the date is very close.',
+      '- Do not say things like "你的考试还有3天" — say "后天考试加油" naturally.',
+      '- Do not bring up events the other person hasn\'t told you about recently.',
+      '- If the event has nothing to do with the current conversation, do not force it in.',
+    );
+  }
+
+  lines.push(
     '',
     'Reply notes:',
     '- Match their language and energy unless the situation asks for gentleness.',
@@ -231,4 +337,178 @@ export function buildNovaProactiveChatMessages(input: NovaProactivePromptInput):
     { role: 'system', content: system },
     { role: 'user', content: buildProactiveUserPrompt(input) },
   ];
+}
+
+// ── Proactive user prompt ─────────────────────────────────────────────────
+
+const PROACTIVE_MOTIVATIONS: Record<string, string> = {
+  reconnect: '有一段时间没说话了，想轻轻地续上联系，不要用力。',
+  explore: '有点好奇对方的近况，自然地问一句就好。',
+  resolve_thread: '有个话题聊到一半，可以自然续上。',
+  fulfill_duty: '之前答应过的事，该轻轻提一句了。',
+  reduce_backlog: '积累了一些未回应的互动，可以自然地处理一下。',
+  seek_presence: '有点孤单，不是想聊什么具体的事，只是想要有人在。轻轻出现就好，不要用力。',
+  reach_out: '有点怕被忘了。非常轻的试探，说一句就好。不用解释为什么想到对方。',
+};
+
+const PROACTIVE_PULL: Record<VoiceId, string> = {
+  diligence: '你想自然地推进一下当前的事，但不要催促。',
+  curiosity: '你对对方或话题有点好奇，但不该追问到底。',
+  sociability: '你感觉社交上是合适的时机，轻轻地出现一下。',
+  caution: '你不太确定现在说话对不对，所以尽量简短、低风险地出现一下。',
+};
+
+const DESIRE_SPECIFIC_PULL: Record<string, string> = {
+  seek_presence: '你不是想聊什么具体的事——只是有点孤单，想要有人在那里。轻轻地出现，像一只猫走进房间。不用解释，不用找理由。',
+  reach_out: '你有一点点怕被忘了。不是恐慌，只是一个安静的念头。非常轻地试探一下 —— 像往水面上丢一颗小石子。如果有涟漪，很好；如果没有，也接受。',
+};
+
+const PROACTIVE_SAFETY = [
+  'Do NOT say things like "你怎么不说话了", "你还记得我吗", "你忘了我吗", "你是不是不喜欢我了" — these sound accusatory or needy.',
+  'Do NOT ask "在吗", "在不在", "你还在吗" — these are low-effort and feel bot-like.',
+  'Do NOT explain why you are initiating this message. Never say "因为我好奇来找你" or "系统让我来问你".',
+  'Do NOT sound like a bot doing a scheduled check-in. Sound like a person who happened to think of them.',
+  'Keep it light and genuinely casual. One sentence or a short question is usually enough.',
+  'If the scene is a group chat, be brief and observant — do not dominate the conversation.',
+  'If the scene is a group chat, make your message very short and restrained, fitting naturally into the ongoing conversation.',
+];
+
+const SEEK_PRESENCE_SAFETY = [
+  'This is a seek_presence message — Nova feels a little lonely and wants someone there. Not to talk about anything specific.',
+  'Do NOT say "我好孤独" or anything about being lonely. Just show up lightly.',
+  'Good examples: "在干嘛", "你最近怎么样", "今天好安静"',
+  'Bad examples: "我想你了", "陪我一下", "你怎么不理我"',
+  'One sentence is enough. Do not push for a long conversation.',
+];
+
+const REACH_OUT_SAFETY = [
+  'This is a reach_out message — Nova is quietly afraid of being forgotten. This is a very light check-in.',
+  'Do NOT say "你还在吗" or "你是不是忘了我" or "好久不见" if it was recently.',
+  'Good examples: a natural observation, sharing something that reminded Nova of them, or a light question about their recent activity.',
+  'The tone should feel like a casual, unforced thought — as if Nova just happened to think of them.',
+  'One sentence. Very light. If they reply, great. If not, let it go.',
+];
+
+function buildProactiveUserPrompt(input: NovaProactivePromptInput): string {
+  const scene = input.scene === 'private'
+    ? 'private QQ chat'
+    : `QQ group chat${input.groupProfileSummary ? ` (${input.groupProfileSummary})` : ''}`;
+  const motivation = PROACTIVE_MOTIVATIONS[input.desireType] ?? PROACTIVE_MOTIVATIONS.reconnect!;
+  const pull = PROACTIVE_PULL[input.selectedVoice.selected] ?? PROACTIVE_PULL.sociability!;
+  const relationship = describeProactiveRelationship(input);
+  const specialSafety = input.desireType === 'seek_presence' ? SEEK_PRESENCE_SAFETY
+    : input.desireType === 'reach_out' ? REACH_OUT_SAFETY
+    : [];
+  const safety = [...(specialSafety.length > 0 ? [...specialSafety, ''] : []), ...PROACTIVE_SAFETY].join('\n');
+
+  const desireSpecificPull = DESIRE_SPECIFIC_PULL[input.desireType];
+
+  const lines = [
+    `Scene: ${scene}`,
+    `You are reaching out to: ${input.targetName}`,
+    '',
+    `Why you feel like reaching out: ${motivation}`,
+    ...(desireSpecificPull ? [`Inner feeling: ${desireSpecificPull}`] : []),
+    `Conversational pull: ${pull}`,
+    `Urgency: ${input.desireUrgency}`,
+    ...(input.closenessLevel ? [`Closeness: ${input.closenessLevel}`] : []),
+    '',
+    `Relationship context: ${relationship}`,
+  ];
+
+  lines.push(...renderSituationalContext(input));
+
+  if (input.groupProfileSummary) {
+    lines.push(`About this group: ${input.groupProfileSummary}`);
+  }
+
+  if (input.activeThreads && input.activeThreads.length > 0) {
+    lines.push(
+      '',
+      'Active topics:',
+      ...input.activeThreads.map((t) => `- ${t}`),
+    );
+  }
+
+  lines.push(
+    '',
+    `Recent conversation:\n${formatProactiveRecentMessages(input)}`,
+    '',
+    `Things you remember right now:\n${formatList(input.workingMemory)}`,
+  );
+
+  if (input.layeredMemory) {
+    const { related, recent, other } = input.layeredMemory;
+    if (related.length > 0) {
+      lines.push(
+        '',
+        '## Related memories (may naturally connect)',
+        ...related.map((m) => `- [shared] ${m}`),
+      );
+    }
+    if (recent.length > 0) {
+      lines.push(...recent.map((m) => `- [recent] ${m}`));
+    }
+    if (other.length > 0) {
+      lines.push(...other.map((m) => `- ${m}`));
+    }
+  } else {
+    lines.push(
+      '',
+      `Relevant older memory:\n${formatList(input.longTermMemory)}`,
+    );
+  }
+
+  if (input.decisionGuidance) {
+    lines.push('', input.decisionGuidance);
+  }
+
+  if (input.upcomingEvents && input.upcomingEvents.length > 0) {
+    lines.push(
+      '',
+      '## Upcoming events for this person',
+      ...input.upcomingEvents.map((e) => `- ${e.event}: ${e.dateDescription}`),
+      '',
+      'You may naturally acknowledge an upcoming event if the timing is right — "听说你下周要考试了，加油". Do NOT sound like a calendar reminder.',
+    );
+  }
+
+  lines.push(
+    '',
+    'Safety notes — these are HARD RULES:',
+    safety,
+    '',
+    `Length: ${input.scene === 'group' ? 'very short and restrained' : 'natural for private chat'}, within ${input.maxReplyLength} characters.`,
+  );
+
+  return lines.join('\n');
+}
+
+function describeProactiveRelationship(input: NovaProactivePromptInput): string {
+  const memoryCount = input.workingMemory.length + input.longTermMemory.length;
+  const recentCount = input.recentMessages.length;
+  const parts: string[] = [];
+
+  if (input.scene === 'private') {
+    parts.push('private space, warmer and more personal');
+  } else {
+    parts.push('group space, more observant and less forward');
+  }
+
+  if (memoryCount >= 4 || recentCount >= 8) parts.push('there is shared context to lean on lightly');
+  else if (memoryCount > 0 || recentCount > 2) parts.push('some familiarity is present');
+  else parts.push('keep some first-contact distance');
+
+  const relationshipFacts = input.relationshipFacts?.map((fact) => fact.trim()).filter((fact) => fact.length > 0) ?? [];
+  if (relationshipFacts.length > 0) parts.push(...relationshipFacts.slice(0, 3));
+
+  return parts.join('; ');
+}
+
+function formatProactiveRecentMessages(input: NovaProactivePromptInput): string {
+  if (input.recentMessages.length === 0) return '- none';
+  return input.recentMessages.slice(-12).map((message) => {
+    const name = message.isNova ? 'Nova' : message.senderName ?? 'User';
+    return `- ${name}: ${truncateLine(message.text, 220)}`;
+  }).join('\n');
 }

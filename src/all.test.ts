@@ -1,3 +1,8 @@
+import './decision/decision-schema.test.js';
+import './decision/decision-validator.test.js';
+import './decision/decision-prompts.test.js';
+import './decision/decision-context.test.js';
+import './decision/decision-agent.test.js';
 import './llm/prompts.test.js';
 import './llm/proactive-prompt.test.js';
 import './llm/response-schema.test.js';

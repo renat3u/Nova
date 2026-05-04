@@ -39,6 +39,29 @@ export interface NovaPromptInput {
   rhythmPattern?: string;
   /** True when Nova has been talking without receiving a reply in this channel. */
   speakingAlone?: boolean;
+  /** Private decision agent guidance for the responder LLM. Never expose this to users. */
+  decisionGuidance?: string;
+  /** Available stickers in this channel for the responder to choose from. */
+  availableStickers?: Array<{
+    emojiPackageId: number;
+    emojiId: string;
+    key: string;
+    summary?: string;
+  }>;
+  /** Upcoming future events relevant to this person (for natural acknowledgment). */
+  upcomingEvents?: Array<{
+    event: string;
+    dateDescription: string;
+    targetId: string;
+  }>;
+  /** Relationship closeness level for behavior guidance. */
+  closenessLevel?: string;
+  /** Layered memory: related (shared experiences), recent, and other. */
+  layeredMemory?: {
+    related: string[];
+    recent: string[];
+    other: string[];
+  };
 }
 
 // ── Proactive prompt input (Step 12) ─────────────────────────────────────
@@ -87,6 +110,22 @@ export interface NovaProactivePromptInput {
   rhythmPattern?: string;
   /** True when Nova has been talking without receiving a reply. */
   speakingAlone?: boolean;
+  /** Private decision agent guidance for the responder LLM. Never expose this to users. */
+  decisionGuidance?: string;
+  /** Upcoming future events relevant to this target (for natural acknowledgment). */
+  upcomingEvents?: Array<{
+    event: string;
+    dateDescription: string;
+    targetId: string;
+  }>;
+  /** Relationship closeness level for behavior guidance. */
+  closenessLevel?: string;
+  /** Layered memory: related (shared experiences), recent, and other. */
+  layeredMemory?: {
+    related: string[];
+    recent: string[];
+    other: string[];
+  };
 }
 
 export type NovaAfterward = 'done' | 'waiting_reply' | 'watching' | 'cooling_down';
@@ -114,6 +153,22 @@ export type NovaStateUpdate =
   | {
       type: 'afterward';
       value: NovaAfterward;
+      reason?: string;
+    }
+  | {
+      type: 'send_sticker';
+      emoji_package_id: number;
+      emoji_id: string;
+      key: string;
+      summary?: string;
+      reason?: string;
+    }
+  | {
+      type: 'future_event';
+      event: string;
+      dateDescription: string;
+      date?: string;
+      targetId?: string;
       reason?: string;
     };
 

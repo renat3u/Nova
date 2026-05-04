@@ -42,6 +42,12 @@ export interface BeatAttrs {
   thread_id: string;
   channel_id?: string;
   message_id?: string;
+  summary: string;
+  beat_type: BeatType;
+  operation: ThreadOperation;
+  weight: number;
+  created_ms: number;
+}
 
 export const RELEVANCE_THRESHOLD = 0.15;
 

@@ -95,6 +95,15 @@ export const SILENCE_REASONS = {
   AFTERWARD_WATCHING: 'afterward_watching',
   AFTERWARD_COOLING_DOWN: 'afterward_cooling_down',
 
+  // Decision agent
+  DECISION_SILENCE: 'decision_silence',
+  DECISION_OBSERVE: 'decision_observe',
+  DECISION_WAIT_REPLY: 'decision_wait_reply',
+  DECISION_COOL_DOWN: 'decision_cool_down',
+  DECISION_AGENT_FAILED: 'decision_agent_failed',
+  DECISION_GUARDRAIL_DENIED: 'decision_guardrail_denied',
+  DECISION_INVALID_RESPONSE: 'decision_invalid_response',
+
   // Meta
   DIRECTED_BYPASS: 'directed_bypass',
   ALLOWED: 'allowed',
@@ -118,8 +127,10 @@ export interface GateContext {
   groupProfile?: GroupProfile | null;
   config: NovaRuntimeConfig;
   rateLimit: RateLimitState;
+  actionQueue?: ActionQueue;
 
   lambdaMultiplier: number;
+}
 
 export type GateVerdict =
   | { type: 'act'; reason: string; values: Record<string, unknown> }
@@ -179,6 +190,173 @@ export function evaluateHardGates(
   Object.assign(values, qqRisk.values);
 
   return null;
+}
+
+/**
+ * Evaluate QQ risk: flood detection, rate limiting, and send failure backoff.
+ * Returns a pass/fail result with level and reason.
+ */
+export function evaluateQQRisk(context: GateContext): {
+  pass: boolean;
+  level: SilenceLevel;
+  reason: string;
+  values: Record<string, unknown>;
+} {
+  const { rateLimit, config, nowMs, event } = context;
+
+  // 1. Send failure backoff.
+  if (rateLimit.hasFailureBackoff(config)) {
+    return {
+      pass: false,
+      level: 'safety',
+      reason: SILENCE_REASONS.SEND_FAILURE_RISK,
+      values: {
+        consecutiveFailures: rateLimit.failureCount,
+        failureLimit: config.consecutiveSendFailureLimit,
+      },
+    };
+  }
+
+  // 2. Flood detection.
+  const floodCheck = rateLimit.checkFlood(nowMs, event, config);
+  if (!floodCheck.safe) {
+    const reason = floodCheck.reason === 'send_failure_risk'
+      ? SILENCE_REASONS.SEND_FAILURE_RISK
+      : floodCheck.reason === 'channel_flood'
+        ? SILENCE_REASONS.CHANNEL_FLOOD
+        : floodCheck.reason === 'user_flood'
+          ? SILENCE_REASONS.USER_FLOOD
+          : SILENCE_REASONS.FLOOD_SAFETY;
+    return {
+      pass: false,
+      level: reason === SILENCE_REASONS.SEND_FAILURE_RISK ? 'safety' : 'safety',
+      reason,
+      values: floodCheck.values as Record<string, unknown>,
+    };
+  }
+
+  // 3. Rate limit check.
+  const rateCheck = rateLimit.checkRateLimit(nowMs, event, config);
+  if (!rateCheck.allowed) {
+    const reason = rateCheck.reason === 'global_rate_cap'
+      ? SILENCE_REASONS.GLOBAL_RATE_CAP
+      : rateCheck.reason === 'channel_rate_cap'
+        ? SILENCE_REASONS.CHANNEL_RATE_CAP
+        : SILENCE_REASONS.GROUP_RATE_CAP;
+    return {
+      pass: false,
+      level: 'hard',
+      reason,
+      values: rateCheck.values as Record<string, unknown>,
+    };
+  }
+
+  return { pass: true, level: 'none', reason: '', values: {} };
+}
+
+/**
+ * Run the full gate chain for a tick and return a single GateDecision.
+ * This is the main entry point for gate evaluation used by message ticks.
+ */
+export function evaluateGates(context: GateContext): GateDecision {
+  const reasons: string[] = [];
+  const values: Record<string, unknown> = {};
+
+  // Hard gates
+  const hardResult = evaluateHardGates(context, reasons, values);
+  if (hardResult) return hardResult;
+
+  // Conversation-aware modulation
+  const convAware = evaluateConversationAware(context);
+  if (convAware.block) {
+    return silence('hard', convAware.blockReason ?? SILENCE_REASONS.CONVERSATION_COOLDOWN, reasons, values);
+  }
+
+  // Closing conversation
+  const closingResult = evaluateClosingConversation(context);
+  if (closingResult) return closingResult;
+
+  // Caution voice gate
+  const cautionResult = evaluateCautionGate(context);
+  if (cautionResult) return cautionResult;
+
+  // Engagement state
+  if (context.event?.chatId) {
+    const engagementResult = evaluateEngagementState(context.event.chatId, context);
+    if (engagementResult) return engagementResult;
+  }
+
+  // API floor
+  const apiFloorResult = evaluateApiFloor(context);
+  if (apiFloorResult) return apiFloorResult;
+
+  // Active cooling (per-channel)
+  if (context.channel) {
+    const coolingResult = evaluateActiveCooling(context);
+    if (coolingResult) return coolingResult;
+  }
+
+  // All passed
+  return allowDecision(SILENCE_REASONS.ALLOWED, values);
+}
+
+/**
+ * API floor gate: block if aggregate pressure is below minimum.
+ */
+export function evaluateApiFloor(context: GateContext): GateDecision | null {
+  const isDirected = context.event?.isDirected === true;
+  const floor = isDirected
+    ? (context.config.directedMinApiToSpeak ?? context.config.minApiToSpeak)
+    : context.config.minApiToSpeak;
+
+  if (context.pressure.api < floor) {
+    return silence('soft', SILENCE_REASONS.API_FLOOR, [], {
+      api: context.pressure.api,
+      floor,
+      directed: isDirected,
+    });
+  }
+  return null;
+}
+
+/**
+ * Per-channel active cooling gate.
+ */
+export function evaluateActiveCooling(context: GateContext): GateDecision | null {
+  const channel = context.channel;
+  if (!channel) return null;
+
+  const lastActionMs = channel.last_nova_action_ms;
+  if (lastActionMs === undefined || lastActionMs === 0) return null;
+
+  const chatType = channel.chat_type;
+  const cooldownMs = chatType === 'group'
+    ? context.config.groupCooldownMs
+    : context.config.privateCooldownMs;
+  const elapsedMs = context.nowMs - lastActionMs;
+
+  if (elapsedMs >= cooldownMs) return null;
+
+  return silence('hard', SILENCE_REASONS.ACTIVE_COOLING, [], {
+    elapsedMs,
+    cooldownMs,
+    lastNovaActionMs: lastActionMs,
+    chatType,
+  });
+}
+
+/**
+ * Run a chain of gate functions, returning the first non-pass verdict.
+ */
+export function runGateChain(
+  gates: Array<(context: GateContext) => GateVerdict>,
+  context: GateContext,
+): GateVerdict {
+  for (const gate of gates) {
+    const verdict = gate(context);
+    if (verdict.type !== 'pass') return verdict;
+  }
+  return { type: 'pass' };
 }
 
 export function evaluateConversationAware(context: GateContext): ConversationAwareModulation {

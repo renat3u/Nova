@@ -99,6 +99,30 @@ export interface NovaTickTrace {
     updatedAt: number;
     expiresAt?: number;
   };
+  /** Decision agent trace (when gatewayMode is 'agent'). */
+  decisionAgent?: {
+    enabled: boolean;
+    model?: string;
+    action?: string;
+    candidateId?: string;
+    targetId?: string | null;
+    generateText?: boolean;
+    responderIntent?: string;
+    reason?: string;
+    confidence?: number;
+    afterward?: string;
+    tags?: string[];
+    raw?: unknown;
+    error?: string;
+    fallbackUsed?: boolean;
+  };
+  /** Algorithmic gate audit results. */
+  algorithmicGateAudit?: Array<{
+    allow: boolean;
+    level: string;
+    reason: string;
+    reasons: string[];
+  }>;
   /** 创建时间戳 */
   createdMs: number;
 }

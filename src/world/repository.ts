@@ -437,6 +437,8 @@ export class NovaWorldRepository {
       p4: snapshot.p4,
       p5: snapshot.p5,
       p6: snapshot.p6,
+      p7: snapshot.p7 ?? 0,
+      p8: snapshot.p8 ?? 0,
       p_prospect: snapshot.p_prospect,
       api: snapshot.api,
       api_peak: snapshot.api_peak,
@@ -445,8 +447,8 @@ export class NovaWorldRepository {
     };
     this.db.prepare(`
       INSERT OR REPLACE INTO pressure_snapshots
-      (id, tick, p1, p2, p3, p4, p5, p6, p_prospect, api, api_peak, created_ms, contributions_json)
-      VALUES (@id, @tick, @p1, @p2, @p3, @p4, @p5, @p6, @p_prospect, @api, @api_peak, @created_ms, @contributions_json)
+      (id, tick, p1, p2, p3, p4, p5, p6, p7, p8, p_prospect, api, api_peak, created_ms, contributions_json)
+      VALUES (@id, @tick, @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p_prospect, @api, @api_peak, @created_ms, @contributions_json)
     `).run(record);
   }
 
@@ -593,7 +595,7 @@ export class NovaWorldRepository {
 
   listPressureSnapshots(limit = 50): PressureSnapshotRecord[] {
     const rows = this.db.prepare(`
-      SELECT id, tick, p1, p2, p3, p4, p5, p6, p_prospect, api, api_peak, created_ms, contributions_json
+      SELECT id, tick, p1, p2, p3, p4, p5, p6, p7, p8, p_prospect, api, api_peak, created_ms, contributions_json
       FROM pressure_snapshots
       ORDER BY created_ms DESC
       LIMIT ?
@@ -606,6 +608,8 @@ export class NovaWorldRepository {
       p4: number;
       p5: number;
       p6: number;
+      p7: number;
+      p8: number;
       p_prospect: number;
       api: number;
       api_peak: number;
@@ -622,6 +626,8 @@ export class NovaWorldRepository {
       p4: row.p4,
       p5: row.p5,
       p6: row.p6,
+      p7: row.p7,
+      p8: row.p8,
       p_prospect: row.p_prospect,
       api: row.api,
       api_peak: row.api_peak,
@@ -1305,6 +1311,72 @@ export class NovaWorldRepository {
         return t.status === 'open' && t.channel_id === channelId;
       })
       .length;
+  }
+
+  /**
+   * List upcoming future_event facts within the given window.
+   * Returns events whose status is 'upcoming' and mentioned within range.
+   */
+  listUpcomingEvents(nowMs: number, windowMs: number = 7 * 24 * 3600 * 1000): Array<{
+    id: string;
+    event: string;
+    dateDescription: string;
+    date?: string;
+    targetId: string;
+    mentionedAtMs: number;
+    status: string;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT id, content, created_ms
+      FROM facts
+      WHERE fact_type = 'memory'
+      ORDER BY created_ms DESC
+      LIMIT 200
+    `).all() as Array<{ id: string; content: string; created_ms: number }>;
+
+    const events: Array<{
+      id: string;
+      event: string;
+      dateDescription: string;
+      date?: string;
+      targetId: string;
+      mentionedAtMs: number;
+      status: string;
+    }> = [];
+
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.content) as Record<string, unknown>;
+        if (parsed.type !== 'future_event') continue;
+        if (parsed.status !== 'upcoming') continue;
+        events.push({
+          id: row.id,
+          event: typeof parsed.event === 'string' ? parsed.event : '',
+          dateDescription: typeof parsed.dateDescription === 'string' ? parsed.dateDescription : '',
+          date: typeof parsed.date === 'string' ? parsed.date : undefined,
+          targetId: typeof parsed.targetId === 'string' ? parsed.targetId : '',
+          mentionedAtMs: typeof parsed.mentionedAtMs === 'number' ? parsed.mentionedAtMs : row.created_ms,
+          status: 'upcoming',
+        });
+      } catch {
+        // Skip non-JSON facts
+      }
+    }
+
+    return events;
+  }
+
+  /** Mark a future_event as acknowledged or passed. */
+  markEventAcknowledged(factId: string, status: 'acknowledged' | 'passed'): void {
+    const row = this.db.prepare('SELECT content FROM facts WHERE id = ?').get(factId) as { content: string } | undefined;
+    if (!row) return;
+    try {
+      const parsed = JSON.parse(row.content) as Record<string, unknown>;
+      parsed.status = status;
+      this.db.prepare('UPDATE facts SET content = ? WHERE id = ?').run(JSON.stringify(parsed), factId);
+    } catch {
+      // Skip non-JSON facts
+    }
   }
 
   /** 获取指定 channel 最近创建的线程时间戳。 */

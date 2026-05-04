@@ -1,7 +1,7 @@
 import path from 'node:path';
-import type { IAUSScoringMode } from '../core/types';
+import type { GatewayMode, GuardrailMode, IAUSScoringMode } from '../core/types';
 import type { NapCatPluginContext, PluginConfigSchema } from './types';
-import type { NovaGroupConfig, NovaPluginConfig } from './types';
+import type { NovaDecisionAgentConfig, NovaGroupConfig, NovaPluginConfig } from './types';
 
 const DEFAULT_DB_FILENAME = 'nova.sqlite';
 
@@ -47,6 +47,79 @@ export const DEFAULT_NOVA_CONFIG: NovaPluginConfig = {
   floodMessageLimit: 30,
   userFloodMessageLimit: 8,
   consecutiveSendFailureLimit: 3,
+
+  // ── Agent gateway configuration ──────────────────────────────────────────
+  //
+  // gatewayMode: 'agent' | 'algorithmic'
+  //   'agent' — Nova's behavior decisions are made by a separate LLM (Decision Agent).
+  //   'algorithmic' — Original pure-gate-driven behavior (for regression/comparison).
+  //
+  // decisionAgent: LLM config for the Decision Agent (independent from main reply LLM).
+  //   - enabled: master switch for the decision agent.
+  //   - baseUrl / apiKey / model: OpenAI-compatible endpoint, key, and model name.
+  //   - temperature: 0.2 recommended (low creativity for consistent decision-making).
+  //   - maxTokens: 1200 recommended (enough for structured JSON response).
+  //   - timeoutMs: 60000 recommended.
+  //   - failMode: 'fallback_algorithmic' | 'silence' | 'allow_reply_only'
+  //     - fallback_algorithmic: Use old gates when decision LLM fails.
+  //     - silence: Go silent when decision LLM fails.
+  //     - allow_reply_only: Only allow directed replies when decision LLM fails.
+  //
+  // decisionGuardrails: 'off' | 'soft' | 'hard'
+  //   - off: Old algorithmic gates do NOT block agent decisions (default for dev/QQ).
+  //   - soft: Record gate violations in trace but still allow execution.
+  //   - hard: Old algorithmic gates can block agent decisions.
+  //
+  // enablePreSendGuardrails: ActLoop pre-send gate re-check.
+  //   - false: (default) Queued proactive actions skip pre-send re-check.
+  //   - true: Restore old pre-send gate behavior.
+  //
+  // auditAlgorithmicGates: Record old gate results for trace/debug.
+  //   - true: (default) Run old gates alongside agent decisions for audit.
+  //
+  // Environment variable overrides (highest priority):
+  //   NOVA_GATEWAY_MODE=agent|algorithmic
+  //   NOVA_DECISION_LLM_BASE_URL=<url>
+  //   NOVA_DECISION_LLM_API_KEY=<key>
+  //   NOVA_DECISION_LLM_MODEL=<model>
+  //   NOVA_DECISION_GUARDRAILS=off|soft|hard
+  //   NOVA_ENABLE_PRE_SEND_GUARDRAILS=true|false
+  //
+  // Example config JSON:
+  // {
+  //   "gatewayMode": "agent",
+  //   "decisionGuardrails": "off",
+  //   "enablePreSendGuardrails": false,
+  //   "auditAlgorithmicGates": true,
+  //   "decisionAgent": {
+  //     "enabled": true,
+  //     "baseUrl": "http://localhost:11434/v1",
+  //     "apiKey": "local",
+  //     "model": "decision-model",
+  //     "temperature": 0.2,
+  //     "maxTokens": 1200,
+  //     "timeoutMs": 60000,
+  //     "responseFormat": "json_object",
+  //     "failMode": "fallback_algorithmic"
+  //   }
+  // }
+
+  // Agent gateway defaults
+  gatewayMode: 'agent' as GatewayMode,
+  decisionAgent: {
+    enabled: true,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    temperature: 0.2,
+    maxTokens: 1200,
+    timeoutMs: 60_000,
+    responseFormat: 'json_object' as const,
+    failMode: 'fallback_algorithmic' as const,
+  } satisfies NovaDecisionAgentConfig,
+  decisionGuardrails: 'off' as GuardrailMode,
+  enablePreSendGuardrails: false,
+  auditAlgorithmicGates: true,
 };
 
 /**
@@ -87,6 +160,36 @@ function defaultDbPath(dataPath?: string): string {
 
 function normalizeIausScoringMode(value: unknown): IAUSScoringMode {
   return value === 'legacy_nsv' || value === 'consideration' ? value : DEFAULT_NOVA_CONFIG.iausScoringMode;
+}
+
+export function normalizeGatewayMode(value: unknown): GatewayMode {
+  return value === 'algorithmic' || value === 'agent' ? value : DEFAULT_NOVA_CONFIG.gatewayMode;
+}
+
+export function normalizeGuardrailMode(value: unknown): GuardrailMode {
+  return value === 'off' || value === 'soft' || value === 'hard' ? value : DEFAULT_NOVA_CONFIG.decisionGuardrails;
+}
+
+function normalizeFailMode(value: unknown): 'fallback_algorithmic' | 'silence' | 'allow_reply_only' {
+  return value === 'fallback_algorithmic' || value === 'silence' || value === 'allow_reply_only'
+    ? value
+    : DEFAULT_NOVA_CONFIG.decisionAgent.failMode;
+}
+
+function normalizeDecisionAgentConfig(raw: unknown): NovaDecisionAgentConfig {
+  const defaults = DEFAULT_NOVA_CONFIG.decisionAgent;
+  if (!isRecord(raw)) return { ...defaults };
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : defaults.enabled,
+    baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : defaults.baseUrl,
+    apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : defaults.apiKey,
+    model: typeof raw.model === 'string' ? raw.model : defaults.model,
+    temperature: numberInRange(raw.temperature, defaults.temperature, 0, 2),
+    maxTokens: integerInRange(raw.maxTokens, defaults.maxTokens, 1, 8192),
+    timeoutMs: typeof raw.timeoutMs === 'number' ? integerInRange(raw.timeoutMs, defaults.timeoutMs ?? 30000, 1000, 300000) : defaults.timeoutMs,
+    responseFormat: 'json_object' as const,
+    failMode: normalizeFailMode(raw.failMode),
+  };
 }
 
 function numberInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -178,6 +281,15 @@ export function normalizePluginConfig(raw: unknown, dataPath?: string): NovaPlug
     floodMessageLimit: integerInRange(raw.floodMessageLimit, defaults.floodMessageLimit, 1, 10000),
     userFloodMessageLimit: integerInRange(raw.userFloodMessageLimit, defaults.userFloodMessageLimit, 1, 10000),
     consecutiveSendFailureLimit: integerInRange(raw.consecutiveSendFailureLimit, defaults.consecutiveSendFailureLimit, 1, 100),
+    gatewayMode: normalizeGatewayMode(raw.gatewayMode),
+    decisionAgent: normalizeDecisionAgentConfig(raw.decisionAgent),
+    decisionGuardrails: normalizeGuardrailMode(raw.decisionGuardrails),
+    enablePreSendGuardrails: typeof raw.enablePreSendGuardrails === 'boolean'
+      ? raw.enablePreSendGuardrails
+      : defaults.enablePreSendGuardrails,
+    auditAlgorithmicGates: typeof raw.auditAlgorithmicGates === 'boolean'
+      ? raw.auditAlgorithmicGates
+      : defaults.auditAlgorithmicGates,
   };
 }
 

@@ -192,6 +192,8 @@ export interface PressureSnapshotRecord {
   p4: number;
   p5: number;
   p6: number;
+  p7?: number;
+  p8?: number;
   p_prospect: number;
   api: number;
   api_peak: number;

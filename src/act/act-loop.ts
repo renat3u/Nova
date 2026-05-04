@@ -113,67 +113,67 @@ export class ActLoop {
       return { processed: false, status: 'queue_empty' };
     }
 
-    // 3. Pre-send gate re-check.
+    // 3. Pre-send gate re-check (configurable via enablePreSendGuardrails).
     //    State may have changed between enqueue and dequeue (config hot-reload,
     //    cooldown expiration, rate-limit window, etc.).
+    //    Default: false for agent gateway (guardrails off).
     const candidate = queued.candidate;
-    const preSendGate = evaluatePreSendGates(ctx, candidate.targetId, candidate.scene, nowMs);
-    if (!preSendGate.allow) {
-      // Gate denied — mark as failed and record silence.
-      ctx.actionQueue.markFailed(queued.id, preSendGate.reason, nowMs);
-      ctx.repository.recordSilence({
-        tick: queued.tick,
-        target_id: candidate.targetId ?? 'act-loop',
-        level: preSendGate.level === 'none' ? 'normal' : preSendGate.level,
-        reason: `pre_send_${preSendGate.reason}`,
-        values: {
-          ...preSendGate.values,
+    if (ctx.config.enablePreSendGuardrails) {
+      const preSendGate = evaluatePreSendGates(ctx, candidate.targetId, candidate.scene, nowMs);
+      if (!preSendGate.allow) {
+        // Gate denied — mark as failed and record silence.
+        ctx.actionQueue.markFailed(queued.id, preSendGate.reason, nowMs);
+        ctx.repository.recordSilence({
+          tick: queued.tick,
+          target_id: candidate.targetId ?? 'act-loop',
+          level: preSendGate.level === 'none' ? 'normal' : preSendGate.level,
+          reason: `pre_send_${preSendGate.reason}`,
+          values: {
+            ...preSendGate.values,
+            queueId: queued.id,
+            originalAction: candidate.action,
+            note: 'pre-send gate re-check denied a queued action; state changed between enqueue and dequeue',
+          },
+          created_ms: nowMs,
+        });
+
+        ctx.logger.info('Nova ActLoop pre-send gate denied queued action', {
           queueId: queued.id,
-          originalAction: candidate.action,
-          note: 'pre-send gate re-check denied a queued action; state changed between enqueue and dequeue',
-        },
-        created_ms: nowMs,
-      });
+          action: candidate.action,
+          targetId: candidate.targetId,
+          gateReason: preSendGate.reason,
+        });
 
-      ctx.logger.info('Nova ActLoop pre-send gate denied queued action', {
-        queueId: queued.id,
-        action: candidate.action,
-        targetId: candidate.targetId,
-        gateReason: preSendGate.reason,
-      });
-
-      // Step 16: When the failure backoff is triggered, clear all remaining
-      // pending actions in the queue.  There is no point in retrying queued
-      // actions while the failure limit is in effect — they will all be
-      // denied at the same gate.
-      if (preSendGate.reason === SILENCE_REASONS.SEND_FAILURE_RISK) {
-        const cleared = ctx.actionQueue.clearQueuedCount();
-        if (cleared > 0) {
-          ctx.repository.recordSilence({
-            tick: queued.tick,
-            target_id: 'act-loop',
-            level: 'safety',
-            reason: SILENCE_REASONS.QUEUE_CLEARED_FAILURE_LIMIT,
-            values: {
+        // When the failure backoff is triggered, clear all remaining pending.
+        if (preSendGate.reason === SILENCE_REASONS.SEND_FAILURE_RISK) {
+          const cleared = ctx.actionQueue.clearQueuedCount();
+          if (cleared > 0) {
+            ctx.repository.recordSilence({
+              tick: queued.tick,
+              target_id: 'act-loop',
+              level: 'safety',
+              reason: SILENCE_REASONS.QUEUE_CLEARED_FAILURE_LIMIT,
+              values: {
+                clearedCount: cleared,
+                triggerQueueId: queued.id,
+                note: 'cleared remaining pending actions in queue after pre-send failure backoff triggered',
+              },
+              created_ms: nowMs,
+            });
+            ctx.logger.warn('Nova ActLoop cleared pending queue on failure backoff', {
               clearedCount: cleared,
               triggerQueueId: queued.id,
-              note: 'cleared remaining pending actions in queue after pre-send failure backoff triggered',
-            },
-            created_ms: nowMs,
-          });
-          ctx.logger.warn('Nova ActLoop cleared pending queue on failure backoff', {
-            clearedCount: cleared,
-            triggerQueueId: queued.id,
-          });
+            });
+          }
         }
-      }
 
-      return {
-        processed: true,
-        action: queued,
-        status: 'gate_denied',
-        gateDecision: preSendGate,
-      };
+        return {
+          processed: true,
+          action: queued,
+          status: 'gate_denied',
+          gateDecision: preSendGate,
+        };
+      }
     }
 
     // 4. Mark as executing and enforce switch cost.
@@ -370,6 +370,7 @@ function evaluatePreSendGates(
     reason: 'scheduled',
     pressure: {
       p1: 0, p2: 0, p3: 0, p4: 0, p5: 0, p6: 0,
+      p7: 0, p8: 0,
       pProspect: 0, api: 0, apiPeak: 0,
       tick: 0, createdMs: nowMs, contributions: {},
     },
