@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS pressure_snapshots (
   p4 REAL NOT NULL,
   p5 REAL NOT NULL,
   p6 REAL NOT NULL,
+  p7 REAL NOT NULL,
+  p8 REAL NOT NULL,
   p_prospect REAL NOT NULL,
   api REAL NOT NULL,
   api_peak REAL NOT NULL,

@@ -4,14 +4,17 @@ node_modules/
 # Build output
 dist/
 dist-test/
+dist-standalone/
 
 # Environment
 .env
 .env.*
 *.local
+.npmrc
 
 # Logs
 *.log
+nova-standalone-config.json
 
 # OS
 .DS_Store

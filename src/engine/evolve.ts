@@ -34,6 +34,7 @@ import type { PersonalityVector } from '../personality/vector';
 import type { NovaAfterward } from '../llm/response-schema';
 import { qqIdFromNodeId } from '../world/constants';
 import { readRV, readVelocity, renderRelationshipFacts, computeCloseness } from '../world/relationship-vector';
+import { chinaHour } from '../utils/china-time';
 
 import { deriveDesires, type Desire, type ExploreGapContext } from './desire';
 import { canExploreTarget, recordExploreSent } from '../pressure/novelty-tracker';
@@ -273,6 +274,9 @@ export interface EvolveContext {
 
   /** Pre-built decision client (created once and reused). */
   decisionClient?: DecisionLLMClient;
+
+  /** Sticker database for populating recentStickersInChannel. */
+  stickerDb?: import('../stickers/sticker-db').StickerDatabase | null;
 }
 
 export interface EvolveResult {
@@ -514,6 +518,7 @@ async function runMessageEvolveAgent(ctx: EvolveContext): Promise<EvolveResult> 
     afterward,
     situationBriefing,
     ...(mentionedRelationshipFacts.size > 0 ? { mentionedRelationshipFacts } : {}),
+    ...(getRecentStickersForContext(ctx) ?? {}),
   });
 
   // 4. Call decision agent.
@@ -573,6 +578,18 @@ async function runMessageEvolveAgent(ctx: EvolveContext): Promise<EvolveResult> 
             reason: 'DECISION_PROACTIVE_NO_CANDIDATE',
             reasons: ['DECISION_PROACTIVE_NO_CANDIDATE'],
             values: { decisionReason: decision.reason },
+          };
+          break;
+        }
+
+        // Hard guard: never enqueue cross-target for a busy target.
+        if (selected.targetId && ctx.actionQueue.isTargetActive(selected.targetId)) {
+          plan.silenceReason = 'DECISION_CROSS_TARGET_BUSY';
+          plan.gateDecision = {
+            allow: false, level: 'normal',
+            reason: SILENCE_REASONS.ENGAGEMENT_WAITING,
+            reasons: [SILENCE_REASONS.ENGAGEMENT_WAITING],
+            values: { targetId: selected.targetId, note: 'cross-target skipped: target busy' },
           };
           break;
         }
@@ -661,6 +678,38 @@ function readChannelAfterwardForValue(
     return undefined;
   }
   return raw.value;
+}
+
+/** Query recent stickers for the current channel from the sticker database. */
+function getRecentStickersForContext(
+  ctx: EvolveContext,
+): { recentStickersInChannel: Array<{
+  summary: string;
+  emojiPackageId: number;
+  emojiId: string;
+  key: string;
+  seenCount: number;
+  lastSeenMs: number;
+}> } | undefined {
+  if (!ctx.stickerDb) return undefined;
+  const channelId = ctx.event?.chatId ?? ctx.channel?.id;
+  if (!channelId) return undefined;
+  try {
+    const records = ctx.stickerDb.listRecentByChannel(channelId, 8);
+    if (records.length === 0) return undefined;
+    return {
+      recentStickersInChannel: records.map((s) => ({
+        summary: s.summary ?? '',
+        emojiPackageId: s.emoji_package_id,
+        emojiId: s.emoji_id,
+        key: s.key,
+        seenCount: s.seen_count,
+        lastSeenMs: s.last_seen_ms,
+      })),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Apply fail mode fallback for message ticks. */
@@ -764,7 +813,7 @@ function runScheduledEvolveAlgorithmic(ctx: EvolveContext): EvolveResult {
 
   // 0. Time-of-day proactive suppression: deep night → total silence,
   //    late night → only intimate contacts with high urgency.
-  const hour = new Date(ctx.nowMs).getHours();
+  const hour = chinaHour(ctx.nowMs);
   if (hour >= 2 && hour < 6) {
     // Deep night: Nova should rest. No proactive messages at all.
     return {
@@ -1759,7 +1808,7 @@ async function runScheduledEvolveAgent(ctx: EvolveContext): Promise<EvolveResult
   const queuedActions: QueuedAction[] = [];
 
   // 0. Time-of-day proactive suppression: deep night → total silence.
-  const hour = new Date(ctx.nowMs).getHours();
+  const hour = chinaHour(ctx.nowMs);
   if (hour >= 2 && hour < 6) {
     return {
       tickPlan: {
@@ -1833,6 +1882,7 @@ async function runScheduledEvolveAgent(ctx: EvolveContext): Promise<EvolveResult
     config: ctx.config,
     algorithmicGateAudit,
     afterward,
+    ...(getRecentStickersForContext(ctx) ?? {}),
   });
 
   // 5. Call decision agent.
@@ -1867,6 +1917,7 @@ async function runScheduledEvolveAgent(ctx: EvolveContext): Promise<EvolveResult
 
     // 6. Apply decision.
     switch (decision.action) {
+      case 'reply':
       case 'proactive':
       case 'ask': {
         // Find matching candidate or create one.
@@ -1891,6 +1942,20 @@ async function runScheduledEvolveAgent(ctx: EvolveContext): Promise<EvolveResult
             scene: decisionCtx.scene,
             reason: `agent_decision: ${decision.reason}`,
           };
+        }
+
+        // Hard guard: never enqueue for a target that already has a pending or in-progress action.
+        // This is enforced regardless of decisionGuardrails mode.
+        if (selected.targetId && ctx.actionQueue.isTargetActive(selected.targetId)) {
+          plan.silenceReason = 'DECISION_TARGET_BUSY';
+          plan.gateDecision = {
+            allow: false, level: 'normal',
+            reason: SILENCE_REASONS.ENGAGEMENT_WAITING,
+            reasons: [SILENCE_REASONS.ENGAGEMENT_WAITING],
+            values: { targetId: selected.targetId, note: 'target already has pending/in-progress action' },
+          };
+          plan.selected = undefined;
+          break;
         }
 
         // Guardrails check.
@@ -2043,6 +2108,7 @@ function buildDecisionTrace(
     confidence: decision.confidence,
     afterward: decision.afterward,
     tags: decision.tags,
+    stateUpdates: decision.stateUpdates,
     fallbackUsed,
   };
 }

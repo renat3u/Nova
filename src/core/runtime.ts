@@ -3,48 +3,36 @@ import { noopLogger } from './logger';
 import type { NovaAction, NovaMessageEvent, NovaRuntimeConfig } from './types';
 import { NovaResponder } from '../act/responder';
 import { ActionQueue, type QueuedAction } from '../act/action-queue';
-import { ActLoop, type ActExecutor, type ActLoopTickResult } from '../act/act-loop';
+import { type ActExecutor, startActLoop, type ActContext } from '../act/act-loop';
 import { openNovaDb, type NovaDbConnection } from '../db/sqlite';
-import { runEvolveTick, type EvolveResult, type EvolveContext } from '../engine/evolve';
-import { evaluateGates } from '../gates/gates';
 import { RateLimitState } from '../gates/rate-limit';
-import { buildSilenceLogEntry } from '../gates/silence-log';
 import { LongTermMemory } from '../memory/long-term-memory';
 import { MemoryService } from '../memory/memory-service';
 import { WorkingMemory } from '../memory/working-memory';
 import { DEFAULT_PERSONALITY_VECTOR, projectPersonalityVector, type PersonalityVector, type VoiceId } from '../personality/vector';
-import { computeLoudness, rememberSelectedVoice, type VoiceFatigueState } from '../voices/loudness';
-import { selectVoice, type VoiceSelectionResult } from '../voices/selection';
+import type { VoiceFatigueState } from '../voices/loudness';
+import type { VoiceSelectionResult } from '../voices/selection';
 import { MoodTracker } from '../engine/mood';
-import { buildSituationBriefing, checkSpeakingAlone, detectRhythmPattern } from '../engine/situation-briefing';
-import { AdaptiveKappa, computeAllPressures, createPressureHistory, toPressureSnapshot, type PressureHistory, type PressureSnapshot } from '../pressure/aggregate';
-import { DEFAULT_KAPPA, conversationIdForChannel, qqIdFromNodeId } from '../world/constants';
+import { AdaptiveKappa, createPressureHistory, type PressureHistory, type PressureSnapshot } from '../pressure/aggregate';
+import { DEFAULT_KAPPA, qqIdFromNodeId } from '../world/constants';
 import type { ChannelAttrs } from '../world/entities';
 import { NovaWorldRepository } from '../world/repository';
 import type { WorldModel } from '../world/model';
-import { buildTickTraceFromEvolve, buildActionTrace, buildDeliberationTrace, buildLlmStateWritebackSummary } from '../trace/writer';
 import type { NovaTickTrace, NovaActionTrace, NovaDeliberationTrace } from '../trace/types';
-import type { StateWritebackResult } from '../llm/state-writeback';
-import { applyNovaStateUpdates } from '../llm/state-writeback';
-import { readRV, readVelocity, renderRelationshipFacts } from '../world/relationship-vector';
-import { generateGroupProfileSummary } from '../relationships/group-profile';
 import { OpenAICompatibleDecisionClient } from '../decision/decision-client';
 import { StickerDatabase } from '../stickers/sticker-db';
 import { detectSentiment } from '../perception/sentiment';
 
-interface PressureTickContext {
-  nowMs: number;
-  reason: 'message' | 'scheduled';
-  eventId?: string;
-  channelId?: string;
-  senderId?: string;
-  directed?: boolean;
-}
+// ── 新增架构组件 ─────────────────────────────────────────────────────────────
 
-interface PressureTickResult {
-  pressure: PressureSnapshot;
-  voice: VoiceSelectionResult;
-}
+import { NovaEventBuffer } from './event-buffer';
+import { TickClock } from './tick-clock';
+import { createModeState, type ModeState } from '../engine/mode-fsm';
+import { startEvolveLoop, type EvolveState, type EvolveLoopController, type ActionRecord } from './scheduler';
+import { toPerturbation } from '../perception/perturbation';
+import { evolveTick as unifiedEvolveTick } from '../engine/evolve-tick';
+
+// ── 公共接口 ─────────────────────────────────────────────────────────────────
 
 export interface NovaRuntimeOptions {
   config: NovaRuntimeConfig;
@@ -76,6 +64,8 @@ export interface RuntimeActionRecordInput {
   createdMs?: number;
 }
 
+// ── NovaRuntime ──────────────────────────────────────────────────────────────
+
 export class NovaRuntime {
   private running = false;
   private startedAt: number | null;
@@ -98,9 +88,9 @@ export class NovaRuntime {
   private silenceCount = 0;
   private lastError?: string;
 
-  // ActLoop / ActionQueue fields
-  private readonly actionQueue = new ActionQueue(50);
-  private readonly actLoop = new ActLoop();
+  // ActionQueue
+  readonly actionQueue = new ActionQueue(50);
+  private _lastActionTrace: NovaActionTrace | null = null;
   private actExecutor: ActExecutor | null = null;
 
   // Mood tracker
@@ -109,47 +99,66 @@ export class NovaRuntime {
   // Decision client (lazy-init)
   private decisionClient: OpenAICompatibleDecisionClient | null = null;
 
-  // Sticker database (独立于 nova.sqlite)
+  // Sticker database
   private stickerDb: StickerDatabase | null = null;
+
+  // ── 新增：Alice 架构字段 ──────────────────────────────────────────────────
+
+  /** 事件缓冲区 — 消息不再当场处理，全部推入 buffer。 */
+  readonly buffer: NovaEventBuffer;
+
+  /** 自适应 tick 时钟。 */
+  readonly clock: TickClock;
+
+  /** AgentMode 状态机。 */
+  modeState: ModeState;
+
+  /** LLM 退避状态。 */
+  llmBackoff: { consecutiveFailures: number; lastFailureMs: number };
+
+  /** 近期行动记录（供 EVOLVE 读取）。 */
+  recentActions: ActionRecord[];
+
+  /** 最近一次压力快照引用（供 ACT loop 的 staleness check 使用，evolveTick 更新 .current）。 */
+  private readonly pressureRef = { current: null as PressureSnapshot | null };
+
+  /** EVOLVE loop 控制器。 */
+  private evolveController: EvolveLoopController | null = null;
+
+  /** ACT loop 控制器。 */
+  private actLoopController: ReturnType<typeof startActLoop> | null = null;
 
   constructor(options: NovaRuntimeOptions) {
     this.config = options.config;
     this.logger = options.logger ?? noopLogger;
     this.selfId = options.selfId;
     this.startedAt = options.startedAt ?? null;
+
+    // 新架构初始化
+    this.buffer = new NovaEventBuffer(
+      options.config.eventBufferMaxSize,
+      options.config.eventBufferMaxProtected,
+    );
+    this.clock = new TickClock({
+      dtMin: options.config.tickDtMin,
+      dtMax: options.config.tickDtMax,
+      kappaT: options.config.tickKappaT,
+    });
+    this.modeState = createModeState();
+    this.llmBackoff = { consecutiveFailures: 0, lastFailureMs: 0 };
+    this.recentActions = [];
   }
 
-  get isRunning(): boolean {
-    return this.running;
-  }
+  // ── 公共 getter ────────────────────────────────────────────────────────────
 
-  get startTime(): number | null {
-    return this.startedAt;
-  }
-
-  get runtimeConfig(): NovaRuntimeConfig {
-    return this.config;
-  }
-
-  get world(): WorldModel | null {
-    return this.repository?.world ?? null;
-  }
-
-  get memory(): MemoryService | null {
-    return this.memoryService;
-  }
-
-  get storagePath(): string | null {
-    return this.db?.path ?? null;
-  }
-
-  get stickerCount(): number {
-    return this.stickerDb?.count ?? 0;
-  }
-
-  get selectedVoice(): VoiceSelectionResult | null {
-    return this.lastVoiceSelection;
-  }
+  get isRunning(): boolean { return this.running; }
+  get startTime(): number | null { return this.startedAt; }
+  get runtimeConfig(): NovaRuntimeConfig { return this.config; }
+  get world(): WorldModel | null { return this.repository?.world ?? null; }
+  get memory(): MemoryService | null { return this.memoryService; }
+  get storagePath(): string | null { return this.db?.path ?? null; }
+  get stickerCount(): number { return this.stickerDb?.count ?? 0; }
+  get selectedVoice(): VoiceSelectionResult | null { return this.lastVoiceSelection; }
 
   get status(): NovaRuntimeStatus {
     return {
@@ -166,6 +175,8 @@ export class NovaRuntime {
     };
   }
 
+  // ── 生命周期 ──────────────────────────────────────────────────────────────
+
   async start(): Promise<void> {
     if (this.running) return;
 
@@ -177,17 +188,34 @@ export class NovaRuntime {
     this.memoryService = new MemoryService(workingMemory, longTermMemory);
     this.memoryService.load();
 
-    // Initialize sticker database (独立于 nova.sqlite)
     const stickerDbPath = this.config.dbPath.replace(/nova\.sqlite$/, 'nova-stickers.sqlite');
     this.stickerDb = new StickerDatabase(stickerDbPath);
 
     this.running = true;
     this.startedAt = Date.now();
     this.logger.info(`Nova Core started${this.selfId ? ` for self_id=${this.selfId}` : ''} (stickers: ${this.stickerDb.count})`);
+
+    // 启动 EVOLVE + ACT 协程
+    if (this.repository) {
+      this.startLoops();
+    }
   }
 
   async stop(): Promise<void> {
     if (!this.running && !this.db) return;
+
+    // 停止新架构协程
+    if (this.evolveController) {
+      this.evolveController.abort();
+      this.evolveController = null;
+    }
+    if (this.actLoopController) {
+      this.actLoopController.abort();
+      this.actLoopController = null;
+    }
+
+    // 关闭队列
+    this.actionQueue.close();
 
     try {
       this.memoryService?.flush();
@@ -204,23 +232,111 @@ export class NovaRuntime {
     this.logger.info('Nova Core stopped');
   }
 
+  // ── 新架构：启动协程 ──────────────────────────────────────────────────────
+
+  private startLoops(): void {
+    if (!this.repository) return;
+
+    const G = this.repository.world;
+    const repository = this.repository;
+    const logger = this.logger;
+
+    // 构造 EvolveState
+    const evolveState: EvolveState = {
+      G,
+      repository,
+      buffer: this.buffer,
+      queue: this.actionQueue,
+      clock: this.clock,
+      config: this.config,
+      personality: this.personality,
+      rateLimit: this.rateLimit,
+      logger,
+      memoryService: this.memoryService ?? undefined,
+      moodTracker: this.moodTracker,
+      modeState: this.modeState,
+      getDecisionClient: () => this.getDecisionClient(),
+      pressureHistory: this.pressureHistory,
+      adaptiveKappa: this.adaptiveKappa,
+      voiceFatigue: this.voiceFatigue,
+      lastVoiceSelection: this.lastVoiceSelection,
+      processedMessages: this.processedMessages,
+      silenceCount: this.silenceCount,
+      llmBackoff: this.llmBackoff,
+      recentActions: this.recentActions,
+      pressureRef: this.pressureRef,
+      systemLock: 'idle',
+      lastEnqueuedAction: null,
+      evolveTickFn: async (state: EvolveState) => {
+        return await unifiedEvolveTick(state);
+      },
+    };
+
+    // 启动 EVOLVE loop
+    this.evolveController = startEvolveLoop(evolveState);
+    logger.info('Nova EVOLVE loop started');
+
+    // 构造 ActContext 并启动 ACT loop
+    if (this.actExecutor) {
+      const actCtx: ActContext = {
+        client: null,
+        G,
+        repository,
+        config: this.config,
+        queue: this.actionQueue,
+        buffer: this.buffer,
+        rateLimit: this.rateLimit,
+        personality: this.personality,
+        logger,
+        getCurrentTick: () => this.clock.tick,
+        getCurrentPressures: () => this.pressureRef.current ?? {
+          tick: 0, createdMs: Date.now(),
+          p1: 0, p2: 0, p3: 0, p4: 0, p5: 0, p6: 0, p7: 0, p8: 0,
+          pProspect: 0, api: 0.5, apiPeak: 0.5, contributions: {},
+        },
+        recordAction: (action: string, target: string | null) => {
+          this.recentActions.push({
+            tick: this.clock.tick,
+            actionType: action,
+            targetId: target ?? '',
+            status: 'success',
+            createdMs: Date.now(),
+          });
+          if (this.recentActions.length > 100) {
+            this.recentActions = this.recentActions.slice(-100);
+          }
+        },
+        reportLLMOutcome: (success: boolean) => {
+          if (!success) {
+            this.llmBackoff.consecutiveFailures += 1;
+            this.llmBackoff.lastFailureMs = Date.now();
+          } else {
+            this.llmBackoff.consecutiveFailures = 0;
+          }
+        },
+      };
+
+      this.actLoopController = startActLoop(actCtx, this.actExecutor);
+      logger.info('Nova ACT loop started');
+    }
+  }
+
+  // ── 消息处理（简化为仅推入 buffer）────────────────────────────────────────
+
   async handleMessage(event: NovaMessageEvent): Promise<NovaAction[]> {
     if (!this.running || !this.config.enabled) return [];
 
     try {
       this.logger.debug(
         `Nova Core received ${event.chatType} message ${event.messageId} directed=${event.isDirected}`,
-        {
-          chatId: event.chatId,
-          senderId: event.senderId,
-          textLength: event.text.length,
-        },
+        { chatId: event.chatId, senderId: event.senderId, textLength: event.text.length },
       );
 
-      this.repository?.applyMessageEvent(event);
-      this.processedMessages += 1;
+      // 注意：applyMessageEvent 不在此处调用
+      // EVOLVE loop 的 perceiveTick 会在 drain buffer 后统一应用事件到世界模型
+      // 避免双重写入（handleMessage + perceiveTick）
 
-      // Save stickers to independent sticker database
+      // 保存贴纸
       if (event.stickers && event.stickers.length > 0 && this.stickerDb) {
         for (const sticker of event.stickers) {
           try {
@@ -236,33 +352,21 @@ export class NovaRuntime {
               chatType: event.chatType,
             });
           } catch (err) {
-            // Don't let sticker saving errors block message processing
-            this.logger.debug('Nova sticker upsert failed', err instanceof Error ? err.message : String(err));
+            this.logger.warn('Nova sticker upsert failed', err instanceof Error ? err.message : String(err));
           }
         }
       }
-      this.rateLimit.rememberMessage(event);
-      const tickResult = this.computePressureTick({
-        nowMs: event.timestamp || Date.now(),
-        reason: 'message',
-        eventId: event.id,
-        channelId: event.chatId,
-        senderId: event.senderId,
-        directed: event.isDirected,
-      });
-      if (!tickResult || !this.repository) return [];
 
-      // ── Emotional contagion: detect sentiment from message and nudge mood ──
+      this.rateLimit.rememberMessage(event);
+
+      // 情感传染
       const sentiment = detectSentiment(event.text);
       if (sentiment && sentiment.confidence > 0.5) {
-        const contagionWeight = 0.05; // small weight — Nova won't be flipped by a single message
         this.moodTracker.nudge({
           valence: sentiment.valence,
           nowMs: event.timestamp || Date.now(),
-          weight: contagionWeight,
+          weight: 0.05,
         });
-
-        // Store last detected sentiment for situation briefing injection
         if (event.chatId && this.repository) {
           this.repository.setRuntimeState(`last_sentiment:${event.chatId}`, {
             valence: sentiment.valence,
@@ -271,163 +375,35 @@ export class NovaRuntime {
             updatedAt: event.timestamp || Date.now(),
           }, event.timestamp || Date.now());
         }
-
-        this.logger.debug('Nova sentiment contagion', {
-          valence: sentiment.valence.toFixed(3),
-          confidence: sentiment.confidence.toFixed(2),
-          cues: sentiment.cues,
-        });
       }
 
-      // Run evolve tick — this dispatches to algorithmic or agent mode internally.
-      const evolveCtx = this.buildMessageEvolveContext(event, tickResult);
-      const evolve = await runEvolveTick(evolveCtx);
-      const plan = evolve.tickPlan;
+      // 推入 EventBuffer — 不再当场回复
+      const perturbation = toPerturbation(event);
+      this.buffer.push(perturbation);
+      this.processedMessages += 1;
 
-      // Trace
-      const tickTrace = buildTickTraceFromEvolve(plan, evolve);
-      const actionTraces: NovaActionTrace[] = [];
-
-      // Check for decision agent state updates (apply when no text is generated).
-      let stateWriteback: StateWritebackResult | undefined;
-      if (plan.decisionAgent?.action && plan.decisionAgent.action !== 'reply' && plan.decisionAgent.action !== 'ask' && plan.decisionAgent.action !== 'proactive') {
-        // Non-text decision — apply state updates from decision agent.
-        const updates = plan.decisionAgent.afterward
-          ? [{ type: 'afterward' as const, value: plan.decisionAgent.afterward }]
-          : undefined;
-        if (updates && this.repository && this.memoryService) {
-          stateWriteback = applyNovaStateUpdates(updates, {
-            event,
-            channelId: event.chatId,
-            nowMs: event.timestamp || Date.now(),
-            source: 'reply',
-            pressure: tickResult.pressure,
-            isGroup: event.chatType === 'group',
-          }, {
-            repository: this.repository,
-            memoryService: this.memoryService,
-            moodTracker: this.moodTracker,
-            logger: this.logger,
-          });
-        }
-      }
-
-      // Apply decision based on agent or gate.
-      if (plan.decisionAgent?.enabled) {
-        const decision = plan.decisionAgent;
-        switch (decision.action) {
-          case 'reply':
-          case 'ask': {
-            if (!this.memoryService) {
-              this.logSilence(event.chatId, tickResult, event, 'memory_service_unavailable');
-              return [{ type: 'silence', reason: 'memory_service_unavailable', level: 'hard' }];
-            }
-            const stickers = this.getAvailableStickersForChannel(event.chatId);
-            const reply = await this.buildReplyWithIntent(event, tickResult, decision.responderIntent, decision.reason, stickers);
-            if (!reply.action) {
-              this.logSilence(event.chatId, tickResult, event, reply.error ?? 'llm_reply_unavailable');
-              return [{ type: 'silence', reason: reply.error ?? 'llm_reply_unavailable', level: 'normal' }];
-            }
-
-            // Trace
-            actionTraces.push(buildActionTrace({
-              tick: this.tick,
-              actionType: 'send_text',
-              targetId: event.chatId,
-              text: typeof reply.action === 'object' && 'text' in reply.action ? (reply.action as { text: string }).text : undefined,
-              voice: tickResult.voice.selected,
-              reasoning: `agent_${decision.action}: ${decision.reason ?? ''}`,
-              status: 'success',
-              createdMs: Date.now(),
-            }));
-
-            this.traceDeliberation(tickTrace, actionTraces, stateWriteback);
-            return [reply.action];
-          }
-          case 'proactive': {
-            // Cross-target proactive: the action was already enqueued by evolve
-            // to the action queue.  For the current message tick, Nova stays
-            // silent in the group chat — the proactive PM will be sent by ActLoop.
-            const silenceReason = 'DECISION_PROACTIVE_ENQUEUED';
-            this.logSilence(event.chatId, tickResult, event, silenceReason, 'soft');
-
-            actionTraces.push(buildActionTrace({
-              tick: this.tick,
-              actionType: 'proactive_enqueued',
-              targetId: plan.selected?.targetId ?? event.chatId,
-              voice: tickResult.voice.selected,
-              reasoning: decision.reason,
-              status: 'silence',
-              createdMs: Date.now(),
-            }));
-
-            this.traceDeliberation(tickTrace, actionTraces, stateWriteback);
-            return [{ type: 'silence', reason: silenceReason, level: 'soft' }];
-          }
-          case 'silence':
-          case 'observe':
-          case 'wait_reply':
-          case 'cool_down': {
-            const silenceLevel = decision.action === 'cool_down' ? 'normal' : 'soft';
-            const silenceReason = `DECISION_${decision.action!.toUpperCase()}`;
-            this.logSilence(event.chatId, tickResult, event, silenceReason, silenceLevel);
-
-            actionTraces.push(buildActionTrace({
-              tick: this.tick,
-              actionType: decision.action!,
-              targetId: event.chatId,
-              voice: tickResult.voice.selected,
-              reasoning: decision.reason,
-              status: 'silence',
-              createdMs: Date.now(),
-            }));
-
-            this.traceDeliberation(tickTrace, actionTraces, stateWriteback);
-            return [{ type: 'silence', reason: silenceReason, level: silenceLevel as 'soft' | 'normal' }];
-          }
-          default:
-            break;
-        }
-      }
-
-      // Fallback: use gate decision.
-      if (!plan.gateDecision.allow) {
-        this.logSilence(event.chatId, tickResult, event, plan.gateDecision.reason, plan.gateDecision.level === 'none' ? 'soft' : plan.gateDecision.level);
-        return [{ type: 'silence', reason: plan.gateDecision.reason, level: plan.gateDecision.level === 'none' ? 'soft' : plan.gateDecision.level }];
-      }
-
-      if (!this.memoryService) {
-        this.logSilence(event.chatId, tickResult, event, 'memory_service_unavailable');
-        return [{ type: 'silence', reason: 'memory_service_unavailable', level: 'hard' }];
-      }
-
-      const stickers = this.getAvailableStickersForChannel(event.chatId);
-      const reply = await this.buildReplyWithIntent(event, tickResult, undefined, undefined, stickers);
-      if (!reply.action) {
-        this.logSilence(event.chatId, tickResult, event, reply.error ?? 'llm_reply_unavailable');
-        return [{ type: 'silence', reason: reply.error ?? 'llm_reply_unavailable', level: 'normal' }];
-      }
-
-      this.traceDeliberation(tickTrace, actionTraces, stateWriteback);
-      return [reply.action];
+      // ACT loop 统一负责所有消息发送
+      return [];
     } catch (error) {
       this.recordError(error);
       throw error;
     }
   }
 
-  /** Build a reply action, optionally passing responderIntent from decision agent. */
+  // ── Reply 构建（供 ACT loop 使用）──────────────────────────────────────────
+
   private async buildReplyWithIntent(
     event: NovaMessageEvent,
-    tickResult: PressureTickResult,
+    pressure: PressureSnapshot,
+    voice: VoiceSelectionResult,
     responderIntent?: string,
     decisionReason?: string,
     availableStickers?: Array<{
-      emojiPackageId: number;
-      emojiId: string;
-      key: string;
-      summary?: string;
+      emojiPackageId: number; emojiId: string; key: string; summary?: string;
     }>,
+    preSelectedSticker?: {
+      emojiPackageId: number; emojiId: string; key: string; summary?: string;
+    },
   ) {
     return new NovaResponder({
       config: this.config,
@@ -438,24 +414,21 @@ export class NovaRuntime {
       moodTracker: this.moodTracker,
     }).buildReplyAction({
       event,
-      pressure: tickResult.pressure,
-      voice: tickResult.voice,
+      pressure,
+      voice,
       ...(responderIntent ? { responderIntent } : {}),
       ...(decisionReason ? { decisionReason } : {}),
       ...(availableStickers && availableStickers.length > 0 ? { availableStickers } : {}),
+      ...(preSelectedSticker ? { preSelectedSticker } : {}),
     });
   }
 
-  /** Get recently seen stickers for a channel to pass to the responder. */
-  private getAvailableStickersForChannel(channelId: string): Array<{
-    emojiPackageId: number;
-    emojiId: string;
-    key: string;
-    summary?: string;
+  getAvailableStickersForChannel(channelId: string): Array<{
+    emojiPackageId: number; emojiId: string; key: string; summary?: string;
   }> {
     if (!this.stickerDb) return [];
     try {
-      return this.stickerDb.listRecent(8).map((s) => ({
+      return this.stickerDb.listRecentByChannel(channelId, 8).map((s) => ({
         emojiPackageId: s.emoji_package_id,
         emojiId: s.emoji_id,
         key: s.key,
@@ -466,38 +439,6 @@ export class NovaRuntime {
     }
   }
 
-  /** Build evolve context for message ticks. */
-  private buildMessageEvolveContext(event: NovaMessageEvent, tickResult: PressureTickResult): EvolveContext {
-    const channel = this.repository!.world.has(event.chatId) && this.repository!.world.getNodeType(event.chatId) === 'channel'
-      ? this.repository!.world.getChannel(event.chatId)
-      : undefined;
-    const conversationId = conversationIdForChannel(event.chatId);
-    const conversation = this.repository!.world.has(conversationId) && this.repository!.world.getNodeType(conversationId) === 'conversation'
-      ? this.repository!.world.getConversation(conversationId)
-      : undefined;
-
-    return {
-      world: this.repository!.world,
-      tick: this.tick,
-      reason: 'message',
-      pressure: tickResult.pressure,
-      voice: tickResult.voice,
-      config: this.config,
-      rateLimit: this.rateLimit,
-      nowMs: event.timestamp || Date.now(),
-      repository: this.repository!,
-      actionQueue: this.actionQueue,
-      logger: this.logger,
-      personality: this.personality,
-      event,
-      channel,
-      conversation,
-      memoryService: this.memoryService ?? undefined,
-      moodTracker: this.moodTracker,
-      decisionClient: this.getDecisionClient(),
-    };
-  }
-
   private getDecisionClient(): OpenAICompatibleDecisionClient | undefined {
     if (!this.config.decisionAgent.enabled) return undefined;
     if (!this.decisionClient) {
@@ -506,144 +447,50 @@ export class NovaRuntime {
     return this.decisionClient;
   }
 
-  private logSilence(
-    chatId: string,
-    tickResult: PressureTickResult,
-    event: NovaMessageEvent,
-    reason: string,
-    level: string = 'normal',
-  ): void {
-    const channel = this.repository!.world.has(chatId) && this.repository!.world.getNodeType(chatId) === 'channel'
-      ? this.repository!.world.getChannel(chatId)
-      : undefined;
-    this.recordSilence(buildSilenceLogEntry({
-      tick: this.tick,
-      targetId: chatId,
-      decision: {
-        allow: false,
-        level: level as 'soft' | 'normal' | 'hard' | 'safety',
-        reason,
-        reasons: [reason],
-        values: {},
-      },
-      context: {
-        nowMs: event.timestamp || Date.now(),
-        reason: 'message',
-        event,
-        pressure: tickResult.pressure,
-        voice: tickResult.voice,
-        config: this.config,
-        rateLimit: this.rateLimit,
-      },
-    }));
-  }
-
-  private traceDeliberation(
-    tickTrace: NovaTickTrace,
-    actionTraces: NovaActionTrace[],
-    stateWriteback?: StateWritebackResult,
-  ): void {
-    if (!this.repository) return;
-    const moodCtx = stateWriteback ? extractDeliberationMoodContext(stateWriteback) : {};
-    const wbCtx = stateWriteback ? extractDeliberationWritebackContext(stateWriteback) : {};
-    const deliberation = buildDeliberationTrace({
-      tickTrace,
-      actionTraces,
-      ...moodCtx,
-      ...wbCtx,
-    });
-    this.repository.recordDeliberationTrace(deliberation);
-  }
-
-  async runScheduledTick(nowMs = Date.now()): Promise<void> {
-    if (!this.running || !this.config.enabled) return;
-
-    try {
-      const tickResult = this.computePressureTick({
-        nowMs,
-        reason: 'scheduled',
-      });
-      if (!tickResult || !this.repository) return;
-
-      const evolveCtx: EvolveContext = {
-        world: this.repository.world,
-        tick: this.tick,
-        reason: 'scheduled',
-        pressure: tickResult.pressure,
-        voice: tickResult.voice,
-        config: this.config,
-        rateLimit: this.rateLimit,
-        nowMs,
-        repository: this.repository,
-        actionQueue: this.actionQueue,
-        logger: this.logger,
-        personality: this.personality,
-        memoryService: this.memoryService ?? undefined,
-        moodTracker: this.moodTracker,
-        decisionClient: this.getDecisionClient(),
-      };
-
-      const evolve = await runEvolveTick(evolveCtx);
-      const plan = evolve.tickPlan;
-
-      // Record silence if nothing was enqueued.
-      if (evolve.queuedActions.length === 0 && !plan.gateDecision.allow) {
-        this.recordSilence(buildSilenceLogEntry({
-          tick: this.tick,
-          targetId: 'scheduled',
-          decision: plan.gateDecision,
-          context: {
-            nowMs,
-            reason: 'scheduled',
-            pressure: tickResult.pressure,
-            voice: tickResult.voice,
-            config: this.config,
-            rateLimit: this.rateLimit,
-          },
-        }));
-      }
-
-      // Trace
-      if (this.repository) {
-        const tickTrace = buildTickTraceFromEvolve(plan, evolve);
-        this.repository.recordTickTrace(tickTrace);
-      }
-    } catch (error) {
-      this.recordError(error);
-      // Don't throw on scheduled ticks — let the scheduler continue.
-      this.logger.warn('Nova scheduled tick failed', error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  /** Process the action queue (called by scheduler on ActLoop interval). */
-  async processActionQueue(nowMs = Date.now()): Promise<ActLoopTickResult | null> {
-    if (!this.running || !this.config.enabled || !this.actExecutor || !this.repository) return null;
-
-    try {
-      return await this.actLoop.tick(
-        {
-          actionQueue: this.actionQueue,
-          world: this.repository.world,
-          repository: this.repository,
-          config: this.config,
-          rateLimit: this.rateLimit,
-          logger: this.logger,
-        },
-        this.actExecutor,
-        nowMs,
-      );
-    } catch (error) {
-      this.logger.warn('Nova ActLoop tick failed', error instanceof Error ? error.message : String(error));
-      return null;
-    }
-  }
-
-  /** Set the ActExecutor callback (wired by plugin layer). */
   setActExecutor(executor: ActExecutor): void {
     this.actExecutor = executor;
   }
 
-  /** Build proactive message text via LLM (called by plugin layer). */
+  // ── Reply / Proactive message 构建（保留供 ACT loop 使用）───────────────────
+
+  /**
+   * 为回复动作生成回复文本（使用原始消息事件作为上下文）。
+   * 供 ACT loop 的 reply 执行路径使用。
+   * 使用入队时保存的 pressureSnapshot 和 lastVoiceSelection，
+   * 避免在 ACT 阶段重新计算压力（压力已在 EVOLVE 阶段确定）。
+   */
+  async buildReplyText(queuedAction: QueuedAction): Promise<string | null> {
+    if (!this.memoryService || !this.repository) return null;
+    const event = queuedAction.originalEvent;
+    if (!event) return null;
+
+    try {
+      const pressure = queuedAction.pressureSnapshot ?? {
+        tick: queuedAction.tick,
+        createdMs: Date.now(),
+        p1: 0, p2: 0, p3: 0, p4: 0, p5: 0, p6: 0, p7: 0, p8: 0,
+        pProspect: 0, api: 0.5, apiPeak: 0.5, contributions: {},
+      };
+      const voice = this.lastVoiceSelection ?? defaultVoice();
+
+      const stickers = this.getAvailableStickersForChannel(event.chatId);
+      const reply = await this.buildReplyWithIntent(
+        event,
+        pressure,
+        voice,
+        queuedAction.decision?.responderIntent,
+        queuedAction.decision?.reason,
+        stickers,
+      );
+      return typeof reply.action === 'object' && 'text' in reply.action
+        ? (reply.action as { text: string }).text
+        : null;
+    } catch (error) {
+      this.logger.warn('Nova reply text generation error', error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
   async buildProactiveMessage(
     queuedAction: QueuedAction,
     channel: ChannelAttrs | undefined,
@@ -655,7 +502,6 @@ export class NovaRuntime {
       const targetId = candidate.targetId ?? '';
       const scene = candidate.scene ?? (channel?.chat_type ?? 'private');
 
-      // Resolve target info
       let targetName = 'someone';
       let targetQQ = '';
       let contactId: string | undefined;
@@ -668,10 +514,7 @@ export class NovaRuntime {
         }
       }
 
-      // Get decision metadata from queued action if available
-      const decision = (queuedAction as Record<string, unknown>).decision as
-        | { action?: string; reason?: string; confidence?: number; responderIntent?: string }
-        | undefined;
+      const decision = (queuedAction as unknown as { decision?: { action?: string; reason?: string; confidence?: number; responderIntent?: string } }).decision;
 
       const reply = await new NovaResponder({
         config: this.config,
@@ -708,6 +551,8 @@ export class NovaRuntime {
     }
   }
 
+  // ── 动作记录 ──────────────────────────────────────────────────────────────
+
   recordActionResult(input: RuntimeActionRecordInput): void {
     const nowMs = input.createdMs ?? Date.now();
     this.repository?.recordAction({
@@ -730,7 +575,6 @@ export class NovaRuntime {
     }
   }
 
-  /** Mark a sticker as sent in the sticker database. */
   markStickerSent(emojiPackageId: number, emojiId: string): void {
     if (!this.stickerDb) return;
     try {
@@ -740,15 +584,11 @@ export class NovaRuntime {
     }
   }
 
+  // ── 查询方法 ──────────────────────────────────────────────────────────────
+
   getRecentActions(limit = 50): Array<{
-    id: string;
-    tick: number | null;
-    actionType: string;
-    targetId: string;
-    text: string;
-    status: string;
-    error?: string;
-    createdMs: number;
+    id: string; tick: number | null; actionType: string; targetId: string;
+    text: string; status: string; error?: string; createdMs: number;
   }> {
     return this.repository?.listRecentActions(limit).map((entry) => ({
       id: entry.id ?? '',
@@ -763,13 +603,8 @@ export class NovaRuntime {
   }
 
   getRecentSilences(limit = 50): Array<{
-    id: string;
-    tick: number | null;
-    targetId: string;
-    level: string;
-    reason: string;
-    values: Record<string, unknown>;
-    createdMs: number;
+    id: string; tick: number | null; targetId: string; level: string;
+    reason: string; values: Record<string, unknown>; createdMs: number;
   }> {
     return this.repository?.listRecentSilences(limit).map((entry) => ({
       id: entry.id ?? '',
@@ -783,20 +618,10 @@ export class NovaRuntime {
   }
 
   getPressureSnapshots(limit = 50): Array<{
-    tick: number;
-    p1: number;
-    p2: number;
-    p3: number;
-    p4: number;
-    p5: number;
-    p6: number;
-    p7: number;
-    p8: number;
-    pProspect: number;
-    api: number;
-    apiPeak: number;
-    createdMs: number;
-    contributions?: unknown;
+    tick: number; p1: number; p2: number; p3: number; p4: number;
+    p5: number; p6: number; p7: number; p8: number;
+    pProspect: number; api: number; apiPeak: number;
+    createdMs: number; contributions?: unknown;
   }> {
     return this.repository?.listPressureSnapshots(limit).map((snapshot) => ({
       tick: snapshot.tick,
@@ -816,10 +641,27 @@ export class NovaRuntime {
     })) ?? [];
   }
 
+  get lastActionTrace(): NovaActionTrace | null { return this._lastActionTrace; }
+
+  getTickTraces(limit = 50, reason?: 'message' | 'scheduled'): NovaTickTrace[] {
+    return this.repository?.listTickTraces(limit, reason) ?? [];
+  }
+
+  getActionTraces(limit = 50): NovaActionTrace[] {
+    return this.repository?.listActionTraces(limit) ?? [];
+  }
+
+  getDeliberationTraces(limit = 50, reason?: 'message' | 'scheduled'): NovaDeliberationTrace[] {
+    return this.repository?.listDeliberationTraces(limit, reason) ?? [];
+  }
+
+  getProactiveTraceSummaries(limit = 50): Array<Record<string, unknown>> {
+    return this.repository?.listProactiveTraceSummaries(limit) ?? [];
+  }
+
   getSeenGroupChannels(): Array<{ groupId: string; channelId: string; title?: string; enabled: boolean }> {
     const world = this.repository?.world;
     if (!world) return [];
-
     return world.getEntitiesByType('channel')
       .map((id) => world.getChannel(id))
       .filter((channel) => channel.chat_type === 'group')
@@ -834,113 +676,12 @@ export class NovaRuntime {
       });
   }
 
-  private computePressureTick(context: PressureTickContext): PressureTickResult | null {
-    if (!this.repository) return null;
-    this.tick += 1;
-    const dtS = this.lastTickMs === null ? 60 : Math.max(1, (context.nowMs - this.lastTickMs) / 1000);
-    this.lastTickMs = context.nowMs;
-    const kappa = this.adaptiveKappa.current();
-    const pressure = computeAllPressures(this.repository.world, this.tick, {
-      nowMs: context.nowMs,
-      history: this.pressureHistory,
-      kappa,
-      tickDt: dtS,
-      moodValence: this.moodTracker.current,
-    });
-    this.adaptiveKappa.update([
-      pressure.P1,
-      pressure.P2,
-      pressure.P3,
-      pressure.P4,
-      pressure.P5,
-      pressure.P6,
-    ], dtS);
-
-    const snapshot = toPressureSnapshot(pressure, this.tick, context.nowMs);
-    this.repository.recordPressureSnapshot({
-      tick: snapshot.tick,
-      created_ms: snapshot.createdMs,
-      p1: snapshot.p1,
-      p2: snapshot.p2,
-      p3: snapshot.p3,
-      p4: snapshot.p4,
-      p5: snapshot.p5,
-      p6: snapshot.p6,
-      p7: snapshot.p7,
-      p8: snapshot.p8,
-      p_prospect: snapshot.pProspect,
-      api: snapshot.api,
-      api_peak: snapshot.apiPeak,
-      contributions: {
-        ...snapshot.contributions,
-        tickContext: context,
-        adaptiveKappa: this.adaptiveKappa.current(),
-      },
-    });
-
-    this.repository.recordPersonalitySnapshot({
-      tick: this.tick,
-      created_ms: context.nowMs,
-      pi_d: this.personality.diligence,
-      pi_c: this.personality.curiosity,
-      pi_s: this.personality.sociability,
-      pi_x: this.personality.caution,
-    });
-
-    const loudness = computeLoudness({
-      world: this.repository.world,
-      pressure,
-      personality: this.personality,
-      channelId: context.channelId,
-      senderId: context.senderId,
-      chatType: context.channelId && this.repository.world.has(context.channelId) && this.repository.world.getNodeType(context.channelId) === 'channel'
-        ? this.repository.world.getChannel(context.channelId).chat_type
-        : undefined,
-      directed: context.directed,
-      nowMs: context.nowMs,
-      fatigueState: this.voiceFatigue,
-    });
-    const voiceReasons = loudness.focalSets.diligence.reasons
-      .concat(loudness.focalSets.curiosity.reasons)
-      .concat(loudness.focalSets.sociability.reasons)
-      .concat(loudness.focalSets.caution.reasons)
-      .slice(0, 8);
-    this.lastVoiceSelection = selectVoice(loudness.loudness, loudness.fatigue, voiceReasons, {
-      deterministic: this.config.debug,
-    });
-    rememberSelectedVoice(this.voiceFatigue, this.lastVoiceSelection.selected);
-
-    this.logger.debug('Nova pressure tick computed', {
-      tick: this.tick,
-      p1: pressure.P1,
-      p2: pressure.P2,
-      p3: pressure.P3,
-      p4: pressure.P4,
-      p5: pressure.P5,
-      p6: pressure.P6,
-      p7: pressure.P7,
-      p8: pressure.P8,
-      pProspect: pressure.P_prospect,
-      api: pressure.API,
-      apiPeak: pressure.API_peak,
-      selectedVoice: this.lastVoiceSelection.selected,
-      voiceLoudness: this.lastVoiceSelection.loudness,
-      voiceProbabilities: this.lastVoiceSelection.probabilities,
-      voiceTemperature: this.lastVoiceSelection.temperature,
-    });
-
-    return { pressure: snapshot, voice: this.lastVoiceSelection };
-  }
-
-  private recordSilence(entry: Parameters<NovaWorldRepository['recordSilence']>[0]): void {
-    this.silenceCount += 1;
-    this.repository?.recordSilence(entry);
-  }
-
   private recordError(error: unknown): void {
     this.lastError = sanitizeRuntimeError(error);
     this.logger.error(`Nova Runtime error: ${this.lastError}`);
   }
+
+  // ── 配置管理 ──────────────────────────────────────────────────────────────
 
   updateConfig(config: NovaRuntimeConfig): void {
     const dbPathChanged = this.config.dbPath !== config.dbPath;
@@ -958,32 +699,16 @@ export class NovaRuntime {
   }
 }
 
-// ── Trace helper functions ─────────────────────────────────────────────────
-
-function extractDeliberationMoodContext(stateWriteback: StateWritebackResult): {
-  afterward?: string;
-  selfMoodBefore?: number;
-  selfMoodAfter?: number;
-} {
-  const result: { afterward?: string; selfMoodBefore?: number; selfMoodAfter?: number } = {};
-  if (stateWriteback.afterward) result.afterward = stateWriteback.afterward;
-  if (stateWriteback.selfMoodBefore && typeof stateWriteback.selfMoodBefore === 'object') {
-    result.selfMoodBefore = (stateWriteback.selfMoodBefore as { valence: number }).valence;
-  }
-  if (stateWriteback.selfMoodAfter && typeof stateWriteback.selfMoodAfter === 'object') {
-    result.selfMoodAfter = (stateWriteback.selfMoodAfter as { valence: number }).valence;
-  }
-  return result;
-}
-
-function extractDeliberationWritebackContext(stateWriteback: StateWritebackResult): {
-  llmStateUpdatesAccepted?: unknown;
-  llmStateUpdatesRejected?: unknown;
-} {
-  const result: { llmStateUpdatesAccepted?: unknown; llmStateUpdatesRejected?: unknown } = {};
-  if (stateWriteback.accepted.length > 0) result.llmStateUpdatesAccepted = stateWriteback.accepted;
-  if (stateWriteback.rejected.length > 0) result.llmStateUpdatesRejected = stateWriteback.rejected;
-  return result;
+function defaultVoice(): VoiceSelectionResult {
+  return {
+    selected: 'diligence' as const,
+    iausAction: 'diligence' as const,
+    loudness: { diligence: 0.5, curiosity: 0.5, sociability: 0.5, caution: 0.5 },
+    fatigue: { diligence: 0, curiosity: 0, sociability: 0, caution: 0 },
+    probabilities: { diligence: 0.4, curiosity: 0.3, sociability: 0.2, caution: 0.1 },
+    temperature: 1.0,
+    reasons: [],
+  };
 }
 
 function sanitizeRuntimeError(error: unknown): string {

@@ -8,6 +8,7 @@
 
 import { getNovaSoul } from '../llm/soul';
 import type { DecisionContext } from './decision-schema';
+import { chinaTimeString, describeChinaTimeOfDay, chinaIsWeekend } from '../utils/china-time';
 
 interface ChatMessage {
   role: 'system' | 'user';
@@ -101,17 +102,6 @@ function buildSystemPrompt(): string {
     '- Weekday: people are busy. Keep it concise unless they invite more.',
     '- Scheduled proactive: at deep night (2-6), never initiate. At late night (22-2), only for very close contacts with high urgency.',
     '',
-    '## Sticker / 表情包使用',
-    'Nova can send QQ stickers (mface). She has a collection of stickers she has seen others use.',
-    '- Use stickers naturally — not as a replacement for words, but as emotional punctuation.',
-    '- A good sticker at the right moment is worth more than a paragraph.',
-    '- Don\'t send stickers when the conversation is serious, sad, or requires careful listening.',
-    '- Don\'t send more than one sticker in a single reply.',
-    '- If the other person just sent a sticker, matching their energy with one of your own feels natural.',
-    '- The sticker you send should fit the emotional tone of what you\'re saying.',
-    '- Don\'t force it — if no sticker feels right, don\'t send one. Silence is better than the wrong sticker.',
-    '- When you decide a sticker should be sent, add a "send_sticker" stateUpdate with the sticker key.',
-    '',
     '## Cross-target proactive (聊天中提及第三方)',
     'When someone @-mentions a contact Nova knows — whether in a group chat (overhearing) or private chat (directly told) — Nova can decide to reach out to that person.',
     'This mimics human behavior: hearing about a friend and checking on them, or being asked about someone and following up.',
@@ -138,13 +128,20 @@ function buildSystemPrompt(): string {
     '- intimate: completely at ease. Can say "陪我" or show neediness. Can initiate anytime.',
     'The closeness level is shown in the Relationship section of the user prompt.',
     '',
+    '## Tick reason rules — reply vs proactive',
+    '- If Tick reason is "message": there is a current incoming message. Use "reply" or "ask" only to respond to that current message.',
+    '- If Tick reason is "scheduled": there is no current incoming message. Never choose "reply" or "ask" on scheduled ticks.',
+    '- If Tick reason is "scheduled" and Nova wants to continue an old conversation, reconnect, or answer something from earlier, choose "proactive" instead of "reply".',
+    '- If an old message looks unanswered but Nova may already be handling it, choose "wait_reply" or "observe" rather than "reply".',
+    '- "reply" means immediate passive response to the current incoming event. "proactive" means Nova initiates or resumes contact by herself.',
+    '',
     '## Action definitions',
     '- silence: do nothing, record silence only.',
     '- observe: do not send a message, but continue watching this channel.',
     '- wait_reply: do not push the conversation; wait for the other person to reply.',
-    '- reply: respond to the current incoming message.',
+    '- reply: respond to the current incoming message. Only valid when Tick reason is "message".',
     '- ask: ask a light question (usually needs text generation).',
-    '- proactive: initiate a message — either a scheduled outreach OR a cross-target check-in when someone Nova knows is mentioned in a group chat.',
+    '- proactive: initiate or resume a message by herself — scheduled outreach, continuing an old conversation, or cross-target check-in.',
     '- cool_down: step back, do not send, set posture to cooling_down.',
     '',
     '## Output format',
@@ -172,7 +169,7 @@ function buildUserPrompt(ctx: DecisionContext): string {
   // Scene
   lines.push(`Tick: ${ctx.tick} (${ctx.reason})`);
   lines.push(`Scene: ${ctx.scene}`);
-  lines.push(`Time: ${new Date(ctx.nowMs).toISOString()} — ${describeTimeOfDayForContext(ctx.nowMs)}`);
+  lines.push(`Time: ${chinaTimeString(ctx.nowMs)} — ${describeTimeOfDayForContext(ctx.nowMs)}`);
 
   // Event
   if (ctx.event) {
@@ -331,6 +328,8 @@ function buildUserPrompt(ctx: DecisionContext): string {
       const timeLabel = timeAgo < 60_000 ? '刚刚' : timeAgo < 3600_000 ? `${Math.round(timeAgo / 60_000)}分钟前` : `${Math.round(timeAgo / 3600_000)}小时前`;
       lines.push(`- [贴纸:${s.summary || '无描述'}] (seen ${s.seenCount}次, ${timeLabel})`);
     }
+    lines.push('');
+    lines.push('Sticker instructions: Nova can send a sticker alongside her reply. If the emotional tone of one of the above stickers fits your intended reply, add a "send_sticker" stateUpdate with that sticker\'s exact emoji_package_id, emoji_id, and key. Copy the values from the list above — do NOT invent IDs. At most one sticker. If none fits, do not include one.');
   }
 
   if (ctx.conversation.situationBriefing && ctx.conversation.situationBriefing.length > 0) {
@@ -360,18 +359,7 @@ export function buildDecisionMessages(ctx: DecisionContext): ChatMessage[] {
 }
 
 function describeTimeOfDayForContext(nowMs: number): string {
-  const hour = new Date(nowMs).getHours();
-  const dayOfWeek = new Date(nowMs).getDay();
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-
-  let desc: string;
-  if (hour >= 6 && hour < 10) desc = '早晨';
-  else if (hour >= 10 && hour < 14) desc = '中午';
-  else if (hour >= 14 && hour < 18) desc = '下午';
-  else if (hour >= 18 && hour < 22) desc = '傍晚';
-  else if (hour >= 22 || hour < 2) desc = '深夜';
-  else desc = '凌晨';
-
-  desc += isWeekend ? '·周末' : '·工作日';
-  return desc;
+  const desc = describeChinaTimeOfDay(nowMs);
+  const weekend = chinaIsWeekend(nowMs) ? '·周末' : '·工作日';
+  return desc + weekend;
 }

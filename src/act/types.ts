@@ -21,7 +21,7 @@ export interface SendTextOptions {
 
 export interface SendResult {
   ok: boolean;
-  actionType: 'send_text';
+  actionType: string;
   targetId: string;
   messageId?: string;
   text?: string;

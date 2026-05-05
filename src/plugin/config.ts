@@ -120,6 +120,17 @@ export const DEFAULT_NOVA_CONFIG: NovaPluginConfig = {
   decisionGuardrails: 'off' as GuardrailMode,
   enablePreSendGuardrails: false,
   auditAlgorithmicGates: true,
+
+  // 新架构字段
+  tickDtMin: undefined,
+  tickDtMax: undefined,
+  tickKappaT: undefined,
+  eventBufferMaxSize: undefined,
+  eventBufferMaxProtected: undefined,
+  minTickIntervalMs: undefined,
+  maxConcurrentEngagements: undefined,
+  switchCostMs: undefined,
+  stalenessThreshold: undefined,
 };
 
 /**
@@ -290,6 +301,16 @@ export function normalizePluginConfig(raw: unknown, dataPath?: string): NovaPlug
     auditAlgorithmicGates: typeof raw.auditAlgorithmicGates === 'boolean'
       ? raw.auditAlgorithmicGates
       : defaults.auditAlgorithmicGates,
+    // 新架构字段
+    tickDtMin: numberInRange(raw.tickDtMin, defaults.tickDtMin, 500, 60_000),
+    tickDtMax: numberInRange(raw.tickDtMax, defaults.tickDtMax, 5_000, 3_600_000),
+    tickKappaT: numberInRange(raw.tickKappaT, defaults.tickKappaT, 0.1, 10),
+    eventBufferMaxSize: integerInRange(raw.eventBufferMaxSize, defaults.eventBufferMaxSize, 50, 10_000),
+    eventBufferMaxProtected: integerInRange(raw.eventBufferMaxProtected, defaults.eventBufferMaxProtected, 10, 1_000),
+    minTickIntervalMs: integerInRange(raw.minTickIntervalMs, defaults.minTickIntervalMs, 500, 60_000),
+    maxConcurrentEngagements: integerInRange(raw.maxConcurrentEngagements, defaults.maxConcurrentEngagements, 1, 10),
+    switchCostMs: integerInRange(raw.switchCostMs, defaults.switchCostMs, 0, 30_000),
+    stalenessThreshold: numberInRange(raw.stalenessThreshold, defaults.stalenessThreshold, 0, 5),
   };
 }
 

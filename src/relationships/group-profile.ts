@@ -1,6 +1,7 @@
 import type { NovaMessageEvent } from '../core/types';
 import type { ContactAttrs } from '../world/entities';
 import { readRV, type RelationshipVector } from '../world/relationship-vector';
+import { chinaHour } from '../utils/china-time';
 import type {
   GroupProfile,
   GroupPolicyInput,
@@ -21,7 +22,7 @@ export function updateActiveHours(
   activeHours: number[],
   timestampMs: number,
 ): number[] {
-  const hour = new Date(timestampMs).getHours();
+  const hour = chinaHour(timestampMs);
   const next = activeHours.slice();
   const current = next[hour] ?? 0;
   next[hour] = current + ACTIVE_HOURS_ALPHA * (1 - current);

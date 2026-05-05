@@ -65,6 +65,9 @@ function migrateNovaDb(db: NovaSqliteDatabase): void {
   addColumnIfMissing(db, 'conversations', 'last_activity_ms', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing(db, 'conversations', 'closing_since_ms', 'INTEGER');
   addColumnIfMissing(db, 'conversations', 'attrs_json', "TEXT NOT NULL DEFAULT '{}'");
+
+  addColumnIfMissing(db, 'pressure_snapshots', 'p7', "REAL NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, 'pressure_snapshots', 'p8', "REAL NOT NULL DEFAULT 0");
 }
 
 function tableExists(db: NovaSqliteDatabase, table: string): boolean {

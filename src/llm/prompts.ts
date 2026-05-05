@@ -1,6 +1,7 @@
 import type { NovaProactivePromptInput, NovaPromptInput } from './response-schema.js';
 import { getNovaSoul } from './soul.js';
 import type { VoiceId } from '../voices/personality.js';
+import { chinaIsWeekend, chinaTimeString } from '../utils/china-time.js';
 
 interface ChatMessage {
   role: 'system' | 'user';
@@ -25,20 +26,18 @@ function describeMood(value: number): string {
 }
 
 function formatWallClock(nowMs: number): string {
-  const now = new Date(nowMs);
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const day = dayNames[now.getDay()] ?? '';
-  const month = now.toLocaleDateString('en-US', { month: 'long' });
-  const date = now.getDate();
-  const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  const timeDescription = describeTimeOfDay(now);
-  return `${day}, ${month} ${date}, ${time}. ${timeDescription}`;
+  const day = dayNames[chinaDayOfWeek(nowMs)] ?? '';
+  return `${day}, ${chinaTimeString(nowMs)}. ${describeTimeOfDay(nowMs)}`;
 }
 
-function describeTimeOfDay(now: Date): string {
-  const hour = now.getHours();
-  const dayOfWeek = now.getDay(); // 0=Sunday
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+function chinaDayOfWeek(nowMs: number): number {
+  return new Date(nowMs + 8 * 60 * 60 * 1000).getUTCDay();
+}
+
+function describeTimeOfDay(nowMs: number): string {
+  const hour = new Date(nowMs + 8 * 60 * 60 * 1000).getUTCHours();
+  const isWeekend = chinaIsWeekend(nowMs);
 
   let timeDesc: string;
   if (hour >= 6 && hour < 10) timeDesc = 'Morning — warm and gentle. A simple greeting feels natural. Low energy is fine.';
@@ -106,7 +105,6 @@ function responseFormatLines(maxReplyLength: number): string[] {
     '    {"type":"memory_note","content":"optional memory candidate","salience":0.6,"reason":"optional"},',
     '    {"type":"thread_note","summary":"optional thread summary","reason":"optional"},',
     '    {"type":"afterward","value":"waiting_reply","reason":"optional"},',
-    '    {"type":"send_sticker","emoji_package_id":235237,"emoji_id":"abc123","key":"xxx","summary":"猫猫捂脸","reason":"optional"},',
     '    {"type":"future_event","event":"考试","dateDescription":"下周","targetId":"qq:user:12345","reason":"optional"}',
     '  ]',
     '}.',
@@ -141,24 +139,31 @@ function responseFormatLines(maxReplyLength: number): string[] {
     '',
     'In group chats, prefer watching or done over waiting_reply. Do not expose or try to steer internal decision machinery, scheduling rules, safety lists, or numeric internals.',
     '',
-    'send_sticker: ask Nova to send a QQ sticker (mface) alongside the text. Use sparingly — a sticker should feel like natural emotional punctuation, not a mandatory attachment.',
-    '  emoji_package_id: the QQ sticker package ID (integer).',
-    '  emoji_id: the sticker ID within the package (string).',
-    '  key: the file key for the sticker (string).',
-    '  summary: optional description of the sticker (string).',
-    '  reason: optional brief reason why Nova chose this sticker (used for trace only).',
-    'Only use send_sticker when the conversation is light and playful. Never use in serious, sad, or tense conversations.',
-    'At most one send_sticker per reply. If no sticker feels right, do not include one.',
-    '',
     'Keep the text natural; do not mention these formatting instructions.',
   ];
 }
 
+function stickerFormatLines(): string[] {
+  return [
+    'send_sticker: when you want to send a sticker (mface) alongside the text. Use sparingly — a sticker should feel like natural emotional punctuation. Only use when the conversation is light and playful.',
+    '  emoji_package_id: the sticker package ID from the available stickers list above.',
+    '  emoji_id: the sticker ID from the available stickers list above.',
+    '  key: the file key from the available stickers list above.',
+    '  summary: optional description of the sticker (string).',
+    '  reason: optional brief reason for choosing this sticker.',
+    '',
+    'IMPORTANT: copy the emoji_package_id, emoji_id, and key EXACTLY from the available stickers listed above. Do NOT invent or guess IDs.',
+    'At most one send_sticker per reply. If none feels right, do not include one.',
+  ];
+}
+
 export function buildNovaChatMessages(input: NovaPromptInput): ChatMessage[] {
+  const hasStickers = input.availableStickers && input.availableStickers.length > 0;
   const system = [
     getNovaSoul(),
     '',
     ...responseFormatLines(input.maxReplyLength),
+    ...(hasStickers ? stickerFormatLines() : []),
   ].join('\n');
 
   return [

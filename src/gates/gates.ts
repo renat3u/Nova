@@ -459,17 +459,16 @@ export function evaluateEngagementState(
   if (!targetId) return null;
   if (!context.actionQueue) return null;
 
-  const pending = context.actionQueue.listPending();
-  const hasWaiting = pending.some(
-    (item) => item.candidate.targetId === targetId,
-  );
+  // 检查是否有 pending 队列条目 或 正在处理的 target（acquireTarget 锁）
+  const hasWaiting = context.actionQueue.isTargetActive(targetId);
 
   if (!hasWaiting) return null;
 
+  const pending = context.actionQueue.listPending();
   return silence('normal', SILENCE_REASONS.ENGAGEMENT_WAITING, [], {
     targetId,
     pendingActionCount: pending.length,
-    note: 'a waiting engagement already exists for this target; skip to avoid duplicate outreach',
+    note: 'a waiting or in-progress engagement already exists for this target; skip to avoid duplicate outreach',
   });
 }
 

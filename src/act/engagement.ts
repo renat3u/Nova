@@ -1,5 +1,12 @@
 
 // runtime/src/engine/act
+
+// ── Engagement 类型别名 ─────────────────────────────────────────────────────
+
+export type EngagementState = 'ready' | 'waiting' | 'watching' | 'done';
+export type WatcherKind = 'watching' | 'waiting_reply';
+export type EngagementOutcome = 'replied' | 'timeout' | 'done' | 'failed' | 'aborted';
+
 export const MAX_CONCURRENT_ENGAGEMENTS = 3;
 
 /**
@@ -223,6 +230,59 @@ export const EngagementSM = {
     return null;
   },
 };
+
+// ── Staleness check ─────────────────────────────────────────────────────────
+
+/**
+ * L2 距离比较入队时的压力快照与当前压力快照。
+ * 用于判断入队时的场景是否已经过时。
+ */
+export function stalenessCheck(
+  enqueueSnapshot: { p1: number; p2: number; p3: number; p4: number; p5: number; p6: number; p7?: number; p8?: number; pProspect: number; api: number },
+  currentSnapshot: { p1: number; p2: number; p3: number; p4: number; p5: number; p6: number; p7?: number; p8?: number; pProspect: number; api: number },
+  threshold: number,
+): { stale: boolean; distance: number } {
+  const dims = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'pProspect', 'api'] as const;
+
+  let sumSquares = 0;
+  for (const dim of dims) {
+    const old = (enqueueSnapshot[dim] as number) ?? 0;
+    const now = (currentSnapshot[dim] as number) ?? 0;
+    const diff = old - now;
+    sumSquares += diff * diff;
+  }
+
+  const distance = Math.sqrt(sumSquares);
+  return { stale: distance > threshold, distance };
+}
+
+// ── Engagement finalization ──────────────────────────────────────────────────
+
+/**
+ * 将一个 engagement 合并到最终状态，返回合并后的记录。
+ * 用于 finalizeSlot 操作。
+ */
+export function finalizeEngagement(
+  record: EngagementRecord,
+  outcome: EngagementOutcome,
+  nowMs: number,
+  error?: string,
+): EngagementRecord {
+  switch (outcome) {
+    case 'replied':
+      return EngagementSM.resolveReplied(record, record.replyMessageId ?? '', nowMs);
+    case 'timeout':
+      return EngagementSM.resolveTimeout(record, nowMs);
+    case 'done':
+      return EngagementSM.resolveDone(record, nowMs);
+    case 'failed':
+      return EngagementSM.resolveFailed(record, error ?? 'unknown', nowMs);
+    case 'aborted':
+      return EngagementSM.abort(record, error ?? 'aborted', nowMs);
+    default:
+      return EngagementSM.resolveDone(record, nowMs);
+  }
+}
 
 // ── Engagement query helpers ───────────────────────────────────────────────
 

@@ -21,17 +21,26 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
-    "napcat-types": "0.0.16"
+    "express": "^4.21.0",
+    "napcat-types": "0.0.16",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^15.3.1",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^4.17.25",
     "@types/node": "^20.19.33",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vite": "^6.4.1"
   },
   "scripts": {
     "build": "vite build",
+    "standalone": "tsx src/standalone/server.ts",
+    "standalone:build": "vite build -c vite.standalone.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vite build -c vite.test.config.ts && node --test \"dist-test/**/*.test.js\""
   }

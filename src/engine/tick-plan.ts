@@ -76,6 +76,8 @@ export interface DecisionAgentTrace {
   confidence?: number;
   afterward?: string;
   tags?: string[];
+  /** State updates proposed by the decision agent (e.g. send_sticker). */
+  stateUpdates?: Array<{ type: string; [key: string]: unknown }>;
   raw?: unknown;
   error?: string;
   fallbackUsed?: boolean;

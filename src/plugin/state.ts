@@ -6,12 +6,12 @@ import { queuedActionToSendTarget } from '../act/act-loop';
 import type { SendResult } from '../act/types';
 import { NovaFileLogger, type NovaLogger } from '../core/logger';
 import { NovaRuntime } from '../core/runtime';
-import { NovaScheduler } from '../core/scheduler';
 import type { NovaRuntimeConfig } from '../core/types';
 import { MessageDedupe } from '../perception/dedupe';
 import { InMemoryDirectedState } from '../perception/directed';
 import { createDefaultConfig, mergePluginConfig, normalizeGatewayMode, normalizeGuardrailMode, normalizePluginConfig } from './config';
 import { sendText } from './actions/send-message';
+import { sendTextWithSticker } from '../stickers/send-sticker';
 import type { NovaGroupConfig, NovaPluginConfig, NovaPluginStats } from './types';
 
 export interface NovaPluginStateSnapshot {
@@ -31,7 +31,6 @@ class NovaPluginState {
   selfId?: string;
   config: NovaPluginConfig = createDefaultConfig();
   runtime: NovaRuntime | null = null;
-  scheduler: NovaScheduler | null = null;
   readonly dedupe = new MessageDedupe();
   readonly directedState = new InMemoryDirectedState();
   readonly actionLog = new InMemoryActionLog();
@@ -59,26 +58,20 @@ class NovaPluginState {
     });
     await this.runtime.start();
 
-    // Wire the ActLoop executor: this callback bridges the core ActLoop to
-    // NapCat's OneBot send_msg action.  Called whenever the ActLoop dequeues
-    // a queued proactive action for execution.
+    // Wire the ActExecutor: this callback bridges the core ACT loop to
+    // NapCat's OneBot send_msg action.  Called whenever the ACT loop dequeues
+    // a queued action (reply or proactive) for execution.
     this.runtime.setActExecutor(async (queuedAction, channel) => {
-      return await this.executeProactiveAction(ctx, queuedAction, channel);
+      return await this.executeAction(ctx, queuedAction, channel);
     });
 
-    this.scheduler = new NovaScheduler({
-      runtime: this.runtime,
-      logger: this.logger,
-    });
-    this.scheduler.start();
+    // EVOLVE + ACT 协程在 runtime.start() 中自动启动
     this.initialized = true;
   }
 
   async cleanup(): Promise<void> {
     this.initialized = false;
     try {
-      this.scheduler?.stop();
-      this.scheduler = null;
       this.runtime?.setActExecutor(null as unknown as import('../act/act-loop').ActExecutor);
       await this.runtime?.stop();
     } catch (error) {
@@ -305,60 +298,75 @@ class NovaPluginState {
       decisionGuardrails: config.decisionGuardrails,
       enablePreSendGuardrails: config.enablePreSendGuardrails,
       auditAlgorithmicGates: config.auditAlgorithmicGates,
+      // 新架构字段
+      tickDtMin: config.tickDtMin,
+      tickDtMax: config.tickDtMax,
+      tickKappaT: config.tickKappaT,
+      eventBufferMaxSize: config.eventBufferMaxSize,
+      eventBufferMaxProtected: config.eventBufferMaxProtected,
+      minTickIntervalMs: config.minTickIntervalMs,
+      maxConcurrentEngagements: config.maxConcurrentEngagements,
+      switchCostMs: config.switchCostMs,
+      stalenessThreshold: config.stalenessThreshold,
     };
   }
 
   /**
-   * Execute a queued proactive action through the NapCat bridge.
+   * Execute a queued action (reply or proactive) through the NapCat bridge.
    *
    * This is the ActExecutor callback wired into NovaRuntime.  It converts
    * the QueuedAction into a send_text target, generates the message text
-   * via the runtime's LLM-based proactive responder (Step 12), and sends
-   * via the OneBot API.
+   * via the runtime's LLM-based responder, optionally attaches a sticker,
+   * and sends via the OneBot API.
    */
-  private async executeProactiveAction(
+  private async executeAction(
     ctx: NapCatPluginContext,
     queuedAction: import('../act/action-queue').QueuedAction,
     channel: import('../world/entities').ChannelAttrs | undefined,
   ): Promise<SendResult> {
     const target = queuedActionToSendTarget(queuedAction, channel);
+    const isReply = queuedAction.kind === 'reply' && queuedAction.originalEvent;
 
-    // Step 12: LLM-generated proactive text via NovaResponder.
-    // Falls back gracefully if the runtime is unavailable or generation fails.
-    const text = await this.buildProactiveText(queuedAction, channel);
+    // 文本生成
+    const text = isReply
+      ? await this.buildReplyText(queuedAction)
+      : await this.buildProactiveText(queuedAction, channel);
+
     if (text === null) {
-      this.logger?.warn('Nova proactive text generation failed — action abandoned', {
-        queueId: queuedAction.id,
-        targetId: target.channelId,
-        desireType: queuedAction.candidate.desireType,
-      });
       return {
         ok: false,
         actionType: 'send_text',
         targetId: target.channelId,
-        error: 'proactive_text_generation_failed',
+        error: 'text_generation_failed',
         messageId: undefined,
         createdMs: Date.now(),
       };
     }
 
-    const result = await sendText(
-      {
-        chatType: target.chatType,
-        userId: target.userId,
-        groupId: target.groupId,
-        channelId: target.channelId,
-      },
-      text,
-      {
-        ctx,
-        quoteReply: false,
-        maxReplyLength: this.config.maxReplyLength,
-      },
-    );
+    // 贴纸支持：回复时根据 personality 概率决定是否发送贴纸
+    let sticker: { emojiPackageId: number; emojiId: string; key: string; summary?: string } | undefined;
+    if (isReply && this.runtime) {
+      const stickers = this.runtime.getAvailableStickersForChannel(target.channelId ?? '');
+      if (stickers.length > 0) {
+        sticker = stickers[Math.floor(Math.random() * stickers.length)];
+      }
+    }
 
-    // Record in the in-memory action log for immediate observability.
-    // The persistent DB record and world update are handled by ActLoop.tick().
+    // 发送
+    let result: SendResult;
+    if (sticker) {
+      result = await sendTextWithSticker(ctx, target, text, sticker);
+      if (result.ok) this.runtime?.markStickerSent(sticker.emojiPackageId, sticker.emojiId);
+    } else {
+      const quoteMsgId = isReply ? queuedAction.originalEvent?.messageId : undefined;
+      result = await sendText(target, text, {
+        ctx,
+        quoteReply: isReply && this.config.quoteReply,
+        quoteMessageId: quoteMsgId,
+        maxReplyLength: this.config.maxReplyLength,
+      });
+    }
+
     this.actionLog.recordSend(result);
 
     if (result.ok) {
@@ -366,24 +374,29 @@ class NovaPluginState {
         target.channelId,
         target.chatType === 'private' ? target.userId : undefined,
       );
-      this.logger?.info('Nova ActLoop sent proactive message', {
-        queueId: queuedAction.id,
-        tick: queuedAction.tick,
-        targetId: result.targetId,
-        scene: queuedAction.candidate.scene,
-        desireType: queuedAction.candidate.desireType,
-        textLength: text.length,
-        messageId: result.messageId,
-      });
-    } else {
-      this.logger?.warn('Nova ActLoop proactive send failed', {
-        queueId: queuedAction.id,
-        targetId: result.targetId,
-        error: result.error,
-      });
     }
 
     return result;
+  }
+
+  /**
+   * Generate reply message text via the LLM.
+   * Uses the original message event for context (quoting, sender info, etc.).
+   */
+  private async buildReplyText(
+    queuedAction: import('../act/action-queue').QueuedAction,
+  ): Promise<string | null> {
+    if (!this.runtime || !queuedAction.originalEvent) return null;
+
+    try {
+      return await this.runtime.buildReplyText(queuedAction);
+    } catch (error) {
+      this.logger?.warn('Nova reply text generation error', {
+        queueId: queuedAction.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   /**

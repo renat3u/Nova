@@ -37,6 +37,13 @@ export interface BuildReplyActionOptions {
     key: string;
     summary?: string;
   }>;
+  /** Pre-selected sticker from the decision agent (bypasses LLM selection). */
+  preSelectedSticker?: {
+    emojiPackageId: number;
+    emojiId: string;
+    key: string;
+    summary?: string;
+  };
 }
 
 export interface BuildProactiveActionOptions {
@@ -98,13 +105,16 @@ export class NovaResponder {
         });
       }
 
-      // Check for send_sticker state update to attach to the action
+      // Check for send_sticker state update or pre-selected sticker to attach to the action.
+      // preSelectedSticker (from decision agent) takes priority over LLM output.
       const stickerFromWriteback = extractStickerFromWriteback(stateWriteback);
-      if (stickerFromWriteback) {
+      const sticker = options.preSelectedSticker ?? stickerFromWriteback;
+      if (sticker) {
         this.options.logger.info('Nova responder attached sticker to action', {
-          emojiPackageId: stickerFromWriteback.emojiPackageId,
-          emojiId: stickerFromWriteback.emojiId,
-          summary: stickerFromWriteback.summary,
+          emojiPackageId: sticker.emojiPackageId,
+          emojiId: sticker.emojiId,
+          summary: sticker.summary,
+          source: options.preSelectedSticker ? 'decision_agent' : 'responder_llm',
         });
       }
 
@@ -118,7 +128,7 @@ export class NovaResponder {
             ...(options.event.chatType === 'group' && options.event.groupId ? { groupId: options.event.groupId } : {}),
           },
           text: validation.text,
-          ...(stickerFromWriteback ? { sticker: stickerFromWriteback } : {}),
+          ...(sticker ? { sticker } : {}),
           ...(this.options.config.quoteReply ? { quoteMessageId: options.event.rawMessageId.toString() } : {}),
         },
         text: validation.text,

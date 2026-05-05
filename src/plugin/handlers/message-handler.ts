@@ -1,9 +1,6 @@
-import type { NovaAction, NovaMessageEvent } from '../../core/types';
-import type { SendTextOptions } from '../../act/types';
+import type { NovaMessageEvent } from '../../core/types';
 import { extractMessageText } from '../../perception/message-text';
 import { normalizeMessageEvent, type OneBotMessageEventLike } from '../../perception/mapper';
-import { sendText } from '../actions/send-message';
-import { sendTextWithSticker } from '../../stickers/send-sticker';
 import type { NapCatPluginContext } from '../types';
 import { novaPluginState } from '../state';
 
@@ -48,7 +45,7 @@ export async function handleMessage(ctx: NapCatPluginContext, rawEvent: OneBotMe
     return;
   }
 
-  const actions = await runtime.handleMessage(event);
+  await runtime.handleMessage(event);
   novaPluginState.stats.processedMessages += 1;
 
   novaPluginState.loggerInstance?.info('Nova message bridge processed event', {
@@ -57,12 +54,7 @@ export async function handleMessage(ctx: NapCatPluginContext, rawEvent: OneBotMe
     chatId: event.chatId,
     senderId: event.senderId,
     directed: event.isDirected,
-    actionCount: actions.length,
   });
-
-  if (actions.length > 0) {
-    await executeActions(ctx, event, actions);
-  }
 }
 
 function isChatEnabled(event: NovaMessageEvent): boolean {
@@ -118,86 +110,4 @@ function extractSenderId(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-async function executeActions(ctx: NapCatPluginContext, event: NovaMessageEvent, actions: NovaAction[]): Promise<void> {
-  for (const action of actions) {
-    if (action.type === 'send_text') {
-      const options: SendTextOptions = {
-        quoteMessageId: action.quoteMessageId,
-        quoteReply: novaPluginState.config.quoteReply,
-        maxReplyLength: novaPluginState.config.maxReplyLength,
-      };
-
-      // If the action has a sticker, send text + sticker together
-      let result;
-      if (action.sticker) {
-        novaPluginState.loggerInstance?.info('Nova message handler sending text with sticker', {
-          emojiPackageId: action.sticker.emojiPackageId,
-          emojiId: action.sticker.emojiId,
-          summary: action.sticker.summary,
-        });
-        result = await sendTextWithSticker(
-          ctx,
-          {
-            chatType: action.target.chatType,
-            userId: action.target.userId,
-            groupId: action.target.groupId,
-            channelId: action.target.channelId,
-          },
-          action.text,
-          {
-            emojiPackageId: action.sticker.emojiPackageId,
-            emojiId: action.sticker.emojiId,
-            key: action.sticker.key,
-            summary: action.sticker.summary,
-          },
-        );
-        // Mark sticker as sent in the database
-        if (result.ok) {
-          novaPluginState.runtime?.markStickerSent(
-            action.sticker.emojiPackageId,
-            action.sticker.emojiId,
-          );
-        }
-      } else {
-        novaPluginState.loggerInstance?.debug('Nova message handler sending text only (no sticker)', {
-          hasStickerField: 'sticker' in action,
-          stickerValue: String((action as Record<string, unknown>).sticker),
-        });
-        result = await sendText(action.target, action.text, { ...options, ctx });
-      }
-
-      novaPluginState.actionLog.recordSend(result);
-      novaPluginState.runtime?.recordActionResult({
-        actionType: result.actionType,
-        targetId: result.targetId,
-        text: result.text,
-        status: result.ok ? 'success' : 'failed',
-        error: result.error,
-        createdMs: result.createdMs,
-        proactive: false,
-        channelId: event.chatId,
-        contactId: event.senderId,
-      });
-
-      if (result.ok) {
-        novaPluginState.directedState.rememberNovaAction(event.chatId, event.senderId);
-        novaPluginState.loggerInstance?.debug(`Nova sent text action to ${result.targetId}${result.messageId ? ` message_id=${result.messageId}` : ''}`);
-        ctx.logger.debug(`Nova sent text action to ${result.targetId}${result.messageId ? ` message_id=${result.messageId}` : ''}`);
-      } else {
-        novaPluginState.loggerInstance?.warn(`Nova send_text action failed for ${result.targetId}: ${result.error}`);
-        ctx.logger.warn(`Nova send_text action failed for ${result.targetId}: ${result.error}`);
-      }
-      continue;
-    }
-
-    novaPluginState.actionLog.recordSilence({
-      targetId: event.chatId,
-      reason: action.reason,
-      level: action.level,
-    });
-    novaPluginState.loggerInstance?.debug(`Nova silence action recorded for ${event.chatId}: ${action.reason}`);
-    ctx.logger.debug(`Nova silence action recorded for ${event.chatId}: ${action.reason}`);
-  }
 }

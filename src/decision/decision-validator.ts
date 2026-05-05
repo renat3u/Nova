@@ -259,7 +259,7 @@ function validateStateUpdates(
     return undefined;
   }
 
-  const validTypes = new Set(['afterward', 'self_mood', 'thread_note', 'memory_note']);
+  const validTypes = new Set(['afterward', 'self_mood', 'thread_note', 'memory_note', 'send_sticker']);
   const filtered = value
     .filter((item): item is Record<string, unknown> =>
       item !== null && typeof item === 'object' && !Array.isArray(item))

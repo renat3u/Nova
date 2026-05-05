@@ -87,6 +87,36 @@ export interface NovaRuntimeConfig {
    * Default: true.
    */
   auditAlgorithmicGates: boolean;
+
+  // ── Tick 控制（新增：对齐 Alice TickClock）─────────────────────────────────
+
+  /** TickClock dtMin 覆盖（毫秒），默认 1000。 */
+  tickDtMin?: number;
+  /** TickClock dtMax 覆盖（毫秒），默认 300000。 */
+  tickDtMax?: number;
+  /** TickClock kappaT 覆盖，默认 1.0。 */
+  tickKappaT?: number;
+
+  // ── EventBuffer（新增）────────────────────────────────────────────────────
+
+  /** EventBuffer 最大容量，默认 1000。 */
+  eventBufferMaxSize?: number;
+  /** EventBuffer protected 区最大容量（directed 消息），默认 100。 */
+  eventBufferMaxProtected?: number;
+
+  // ── EVOLVE（新增）─────────────────────────────────────────────────────────
+
+  /** 最小 tick 间隔（毫秒），默认 3000。 */
+  minTickIntervalMs?: number;
+
+  // ── ACT（新增）────────────────────────────────────────────────────────────
+
+  /** 最大并发 engagement 数，默认 3。 */
+  maxConcurrentEngagements?: number;
+  /** 目标切换成本（毫秒），默认 1500。 */
+  switchCostMs?: number;
+  /** 陈旧性检查阈值（L2 距离），默认 0.5。 */
+  stalenessThreshold?: number;
 }
 
 export interface NovaStickerRef {
@@ -99,7 +129,7 @@ export interface NovaStickerRef {
 
 export interface NovaMessageEvent {
   id: string;
-  platform: 'qq';
+  platform: string;
   rawEvent: unknown;
   messageId: string;
   rawMessageId: string | number;

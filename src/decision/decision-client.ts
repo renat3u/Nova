@@ -44,7 +44,7 @@ const MAX_RETRIES = 2;
 const RETRY_BASE_DELAYS_MS = [2_000, 8_000];
 
 /** Error codes that are safe to retry. */
-const RETRYABLE_CODES = new Set(['timeout', 'network_error']);
+const RETRYABLE_CODES = new Set(['timeout', 'network_error', 'empty_response']);
 
 export class OpenAICompatibleDecisionClient implements DecisionLLMClient {
   constructor(private readonly config: DecisionAgentConfig) {}

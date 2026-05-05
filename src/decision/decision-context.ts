@@ -127,7 +127,13 @@ export function buildDecisionContext(params: BuildDecisionContextParams): Decisi
 
   // Build memory
   const working = params.memoryService.getWorkingMemory(7).map((item) => item.content);
-  const longTerm = params.memoryService.getRelevantFacts({ limit: 8 }).map((f) => f.content);
+  const memorySubjectId = params.event?.senderId ?? params.candidates[0]?.targetId;
+  const memoryText = params.event?.text;
+  const longTerm = params.memoryService.getRelevantFacts({
+    ...(memorySubjectId ? { subjectId: memorySubjectId } : {}),
+    ...(memoryText ? { text: memoryText } : {}),
+    limit: 8,
+  }).map((f) => f.content);
 
   // Upcoming events for this sender
   const upcomingEvents = params.event?.senderId
@@ -329,7 +335,8 @@ function resolveTargetLabel(world: WorldModel, targetId: string): string {
 function resolveContactQQ(world: WorldModel, senderId: string): string | undefined {
   if (!world.has(senderId)) return undefined;
   if (world.getNodeType(senderId) === 'contact') {
-    return world.getContact(senderId).qq;
+    const contact = world.getContact(senderId);
+    return contact.name ?? contact.nickname ?? contact.qq;
   }
   return undefined;
 }

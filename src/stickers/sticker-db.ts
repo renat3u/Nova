@@ -79,6 +79,7 @@ export class StickerDatabase {
   private readonly stmtListBySender: Database.Statement;
   private readonly stmtListBySummary: Database.Statement;
   private readonly stmtListRecent: Database.Statement;
+  private readonly stmtListRecentByChannel: Database.Statement;
   private readonly stmtListFrequent: Database.Statement;
   private readonly stmtListNeverSent: Database.Statement;
 
@@ -151,6 +152,13 @@ export class StickerDatabase {
       LIMIT ?
     `);
 
+    this.stmtListRecentByChannel = this.db.prepare(`
+      SELECT * FROM stickers
+      WHERE channel_id = ?
+      ORDER BY last_seen_ms DESC
+      LIMIT ?
+    `);
+
     this.stmtListFrequent = this.db.prepare(`
       SELECT * FROM stickers
       WHERE seen_count >= ?
@@ -214,6 +222,11 @@ export class StickerDatabase {
   /** List recently seen stickers. */
   listRecent(limit = 20): StickerRecord[] {
     return this.stmtListRecent.all(limit) as StickerRecord[];
+  }
+
+  /** List recently seen stickers in a specific channel. */
+  listRecentByChannel(channelId: string, limit = 20): StickerRecord[] {
+    return this.stmtListRecentByChannel.all(channelId, limit) as StickerRecord[];
   }
 
   /** List frequently seen stickers (above minSeenCount threshold). */

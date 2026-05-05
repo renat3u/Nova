@@ -88,6 +88,36 @@ export interface NovaPluginConfig {
    * Default: true.
    */
   auditAlgorithmicGates: boolean;
+
+  // ── Tick 控制 ──────────────────────────────────────────────────────────────
+
+  /** TickClock dtMin 覆盖（毫秒）。 */
+  tickDtMin?: number;
+  /** TickClock dtMax 覆盖（毫秒）。 */
+  tickDtMax?: number;
+  /** TickClock kappaT 覆盖。 */
+  tickKappaT?: number;
+
+  // ── EventBuffer ────────────────────────────────────────────────────────────
+
+  /** EventBuffer 最大容量。 */
+  eventBufferMaxSize?: number;
+  /** EventBuffer protected 区最大容量（directed 消息）。 */
+  eventBufferMaxProtected?: number;
+
+  // ── EVOLVE ─────────────────────────────────────────────────────────────────
+
+  /** 最小 tick 间隔（毫秒）。 */
+  minTickIntervalMs?: number;
+
+  // ── ACT ────────────────────────────────────────────────────────────────────
+
+  /** 最大并发 engagement 数。 */
+  maxConcurrentEngagements?: number;
+  /** 目标切换成本（毫秒）。 */
+  switchCostMs?: number;
+  /** 陈旧性检查阈值。 */
+  stalenessThreshold?: number;
 }
 
 export interface NovaPluginStats {
