@@ -60,4 +60,25 @@ export interface NovaStandaloneConfig {
   enablePreSendGuardrails: boolean;
   auditAlgorithmicGates: boolean;
   port: number;
+
+  /** 压力值手动覆盖。null 表示使用计算值。覆盖的是原始压力值（非归一化后）。 */
+  pressureValueOverrides?: {
+    p1?: number | null;
+    p2?: number | null;
+    p3?: number | null;
+    p4?: number | null;
+    p5?: number | null;
+    p6?: number | null;
+    p7?: number | null;
+    p8?: number | null;
+  };
+
+  /** 自动停止 tick 数（0 表示不自动停止），默认 200。 */
+  autoStopAfterTick?: number;
+
+  /** 启用计划动作（standalone 从配置读取，不再硬编码）。 */
+  enableScheduledActions?: boolean;
+
+  /** 主动消息白名单 QQ 列表。 */
+  proactiveWhitelistQQ?: string[];
 }

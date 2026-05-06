@@ -73,6 +73,16 @@ export class AdaptiveKappa {
     return this.current();
   }
 
+  /** 带掩码的部分更新：mask[index] 为 false 时跳过该维度（保留覆盖）。 */
+  updateWithMask(pressures: PressureDims, dtS: number, mask: boolean[]): PressureDims {
+    const alpha = 1 - Math.exp((-Math.max(1, dtS) * Math.LN2) / this.halfLifeS);
+    this.ema = this.ema.map((value, index) => {
+      if (!mask[index]) return value;
+      return alpha * Math.abs(pressures[index] ?? 0) + (1 - alpha) * value;
+    }) as PressureDims;
+    return this.current();
+  }
+
   current(): PressureDims {
     return this.ema.map((value, index) => Math.max(this.kappaMin[index] ?? 0, value)) as PressureDims;
   }

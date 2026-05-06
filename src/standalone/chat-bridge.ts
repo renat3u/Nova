@@ -144,9 +144,23 @@ export class WebChatBridge {
       return sent;
     };
 
+    const isProactive = !isReply;
+    if (isProactive) {
+      console.log(`[chat-bridge] proactive execution start: targetId=${targetId}, hasChannel=${channel != null}`);
+    }
+
     const text = isReply
       ? await runtime.buildReplyText(queuedAction)
       : await runtime.buildProactiveMessage(queuedAction, channel);
+
+    if (isProactive) {
+      console.log(`[chat-bridge] proactive build result: hasText=${text != null}, textLen=${text?.length ?? 0}`);
+    }
+
+    // Task 6: 记录 proactive 发送
+    if (isProactive && text) {
+      runtime.recordProactiveSent();
+    }
 
     if (!text) {
       // LLM 未配置或生成失败 → 告知前端停止 thinking，发送错误提示

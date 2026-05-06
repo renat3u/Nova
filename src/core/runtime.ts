@@ -122,6 +122,17 @@ export class NovaRuntime {
   /** 最近一次压力快照引用（供 ACT loop 的 staleness check 使用，evolveTick 更新 .current）。 */
   private readonly pressureRef = { current: null as PressureSnapshot | null };
 
+  /** 用户活动追踪（Task 6: 静默惩罚）。 */
+  userActivity: {
+    lastUserInputMs: number;
+    lastNovaProactiveMs: number;
+    consecutiveUnansweredProactive: number;
+  } = {
+    lastUserInputMs: 0,
+    lastNovaProactiveMs: 0,
+    consecutiveUnansweredProactive: 0,
+  };
+
   /** EVOLVE loop 控制器。 */
   private evolveController: EvolveLoopController | null = null;
 
@@ -270,7 +281,18 @@ export class NovaRuntime {
       evolveTickFn: async (state: EvolveState) => {
         return await unifiedEvolveTick(state);
       },
+      // Task 6: 用户活动追踪
+      userActivity: this.userActivity,
+      // Task 3: 自动停止
+      onAutoStop: () => {
+        logger.info('Nova auto-stop callback invoked, stopping core...');
+        // 异步停止（不阻塞 EVOLVE loop 退出）
+        this.stop().catch((err) => logger.warn('Nova auto-stop error', err instanceof Error ? err.message : String(err)));
+      },
     };
+
+    // Task 5: 日志记录 proactive 配置状态
+    logger.info(`Nova proactive: ${this.config.proactiveEnabled ? 'enabled' : 'disabled'}, mode: ${this.config.gatewayMode}, guardrails: ${this.config.decisionGuardrails}`);
 
     // 启动 EVOLVE loop
     this.evolveController = startEvolveLoop(evolveState);
@@ -325,6 +347,10 @@ export class NovaRuntime {
 
   async handleMessage(event: NovaMessageEvent): Promise<NovaAction[]> {
     if (!this.running || !this.config.enabled) return [];
+
+    // 记录用户活动（Task 6: 静默惩罚）
+    this.userActivity.lastUserInputMs = Date.now();
+    this.userActivity.consecutiveUnansweredProactive = 0;
 
     try {
       this.logger.debug(
@@ -388,6 +414,19 @@ export class NovaRuntime {
       this.recordError(error);
       throw error;
     }
+  }
+
+  // ── 用户活动追踪（Task 6: 静默惩罚）─────────────────────────────────────────
+
+  /** 记录 proactive 消息已发送。 */
+  recordProactiveSent(): void {
+    this.userActivity.lastNovaProactiveMs = Date.now();
+    this.userActivity.consecutiveUnansweredProactive += 1;
+  }
+
+  /** 用户回复后重置 proactive 计数器。 */
+  recordUserReply(): void {
+    this.userActivity.consecutiveUnansweredProactive = 0;
   }
 
   // ── Reply 构建（供 ACT loop 使用）──────────────────────────────────────────
@@ -495,11 +534,15 @@ export class NovaRuntime {
     queuedAction: QueuedAction,
     channel: ChannelAttrs | undefined,
   ): Promise<string | null> {
-    if (!this.memoryService || !this.repository) return null;
+    if (!this.memoryService || !this.repository) {
+      this.logger.warn('Nova buildProactiveMessage: memoryService or repository unavailable');
+      return null;
+    }
 
     try {
       const candidate = queuedAction.candidate;
       const targetId = candidate.targetId ?? '';
+      this.logger.info('Nova generating proactive message', { targetId, desireType: candidate.desireType, voice: this.lastVoiceSelection?.selected });
       const scene = candidate.scene ?? (channel?.chat_type ?? 'private');
 
       let targetName = 'someone';
@@ -544,7 +587,9 @@ export class NovaRuntime {
         ...(decision?.reason ? { decisionReason: decision.reason } : {}),
       });
 
-      return reply.text ?? null;
+      const result = reply.text ?? null;
+      this.logger.info('Nova proactive message generated', { targetId, hasText: result != null, textLen: result?.length ?? 0, hasError: reply.error != null, error: reply.error });
+      return result;
     } catch (error) {
       this.logger.warn('Nova proactive text generation error', error instanceof Error ? error.message : String(error));
       return null;

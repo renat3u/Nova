@@ -93,6 +93,17 @@ export async function evolveTick(state: EvolveState): Promise<boolean> {
   } as Parameters<typeof computeAllPressures>[2];
   const allPressures = computeAllPressures(G, tick, computeOpts);
 
+  // 应用压力值手动覆盖（直接替换计算出的原始压力值）
+  const valueOverrides = state.config.pressureValueOverrides ?? {};
+  if (valueOverrides.p1 != null) allPressures.P1 = valueOverrides.p1;
+  if (valueOverrides.p2 != null) allPressures.P2 = valueOverrides.p2;
+  if (valueOverrides.p3 != null) allPressures.P3 = valueOverrides.p3;
+  if (valueOverrides.p4 != null) allPressures.P4 = valueOverrides.p4;
+  if (valueOverrides.p5 != null) allPressures.P5 = valueOverrides.p5;
+  if (valueOverrides.p6 != null) allPressures.P6 = valueOverrides.p6;
+  if (valueOverrides.p7 != null) allPressures.P7 = valueOverrides.p7;
+  if (valueOverrides.p8 != null) allPressures.P8 = valueOverrides.p8;
+
   (state.adaptiveKappa as AdaptiveKappa).update(
     [allPressures.P1, allPressures.P2, allPressures.P3, allPressures.P4, allPressures.P5, allPressures.P6],
     dtS,
@@ -602,6 +613,9 @@ export function applyPlan(
         action: plan.selected.action,
         targetId: plan.selected.targetId,
         desireType: plan.selected.desireType,
+        kind,
+        queueSize: state.queue.size,
+        hasDecisionAgent: plan.decisionAgent != null,
       });
       return true;
     }
@@ -611,6 +625,8 @@ export function applyPlan(
       action: plan.selected.action,
       targetId: plan.selected.targetId,
       reason: 'queue_full_or_evicted',
+      queueSize: state.queue.size,
+      queueClosed: state.queue.closed,
     });
   }
 
@@ -666,7 +682,8 @@ function evaluateCandidateGateChain(
 
   // 3. Whitelist check for private proactive targets
   if (!isReply && scene === 'private' && channelId) {
-    const whitelistGate = evaluateWhitelistGate(channelId, null, config.proactiveWhitelistQQ);
+    const targetQQ = channelId.includes(':') ? channelId.split(':').pop() ?? null : channelId;
+    const whitelistGate = evaluateWhitelistGate(channelId, targetQQ, config.proactiveWhitelistQQ);
     if (whitelistGate) return whitelistGate;
   }
 

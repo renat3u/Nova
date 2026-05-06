@@ -8,6 +8,14 @@
 
 export type AgentMode = 'wakeup' | 'patrol' | 'conversation' | 'consolidation' | 'dormant';
 
+/** 静默惩罚参数 — 用于延长长时间无交互时的 tick 间隔。 */
+export interface SilencePenalty {
+  /** 用户无输入的秒数。 */
+  userSilenceSeconds: number;
+  /** 连续无回应的 proactive 数量。 */
+  unansweredProactiveCount: number;
+}
+
 export const MODE_TIMING: Record<AgentMode, { dtMin: number; dtMax: number }> = {
   wakeup:        { dtMin: 8_000,   dtMax: 20_000 },
   patrol:        { dtMin: 1_000,   dtMax: 300_000 },
@@ -77,6 +85,49 @@ export class TickClock {
     this._lastAdvanceMs = nowMs;
     const dt = elapsedMs === 0 ? 60 : Math.max(1, elapsedMs / 1000);
     return { tick: this._tick, dt };
+  }
+
+  /**
+   * 计算带静默惩罚的 tick 间隔。
+   *
+   * 当用户长时间无输入或 proactive 无回应时，在基础间隔上叠加乘数。
+   * 规则：
+   *   1. 用户无输入超过 5 分钟，每超出 1 分钟增加 0.2x，最大 10x
+   *   2. 连续 5 条 proactive 无回应，每多一条增加 0.5x，最大额外 5x
+   *   3. 连续 3 条无回应 + conversation 模式 → 强制 ≥ 3x 乘数
+   */
+  computeIntervalWithPenalty(
+    api: number,
+    mode: AgentMode,
+    penalty: SilencePenalty,
+    config?: { silencePenaltyStartSeconds?: number; silenceMaxMultiplier?: number; silenceUnansweredProactiveThreshold?: number },
+  ): number {
+    const baseInterval = this.computeInterval(api, mode);
+    const startSeconds = config?.silencePenaltyStartSeconds ?? 300;
+    const maxMultiplier = config?.silenceMaxMultiplier ?? 10;
+    const proactiveThreshold = config?.silenceUnansweredProactiveThreshold ?? 3;
+
+    let silenceMultiplier = 1.0;
+
+    // 规则 1: 用户无输入超过阈值，开始延长
+    const silenceMinutes = penalty.userSilenceSeconds / 60;
+    const thresholdMinutes = startSeconds / 60;
+    if (silenceMinutes > thresholdMinutes) {
+      silenceMultiplier = Math.min(maxMultiplier, 1 + (silenceMinutes - thresholdMinutes) * 0.2);
+    }
+
+    // 规则 2: 连续 proactive 无回应，进一步延长
+    if (penalty.unansweredProactiveCount >= 5) {
+      const proactivePenalty = Math.min(5, (penalty.unansweredProactiveCount - 4) * 0.5);
+      silenceMultiplier = Math.max(silenceMultiplier, 1 + proactivePenalty);
+    }
+
+    // 规则 3: proactive 连续无回应 + conversation 模式 → 强制更长的间隔
+    if (penalty.unansweredProactiveCount >= proactiveThreshold && mode === 'conversation') {
+      silenceMultiplier = Math.max(silenceMultiplier, 3);
+    }
+
+    return Math.round(baseInterval * silenceMultiplier);
   }
 
   /** 重置 tick 计数器（用于重启等场景）。 */

@@ -19,6 +19,10 @@ class NovaDashboard {
     this.initPanels();
     this.connectWS();
     this.startPolling();
+    // 初始获取压力覆盖状态（延迟确保 apiClient 就绪）
+    setTimeout(() => this._panels.pressure?.fetchOverrides(this.apiClient), 500);
+    // 加载配置并同步设置面板
+    setTimeout(() => this._loadConfigToSettings(), 800);
   }
 
   applyTheme() {
@@ -52,6 +56,95 @@ class NovaDashboard {
     if (newSessionBtn) {
       newSessionBtn.addEventListener('click', () => this.resetSession());
     }
+
+    // 启动 Core 按钮
+    const startCoreBtn = document.getElementById('btn-start-core');
+    if (startCoreBtn) {
+      startCoreBtn.addEventListener('click', async () => {
+        try {
+          const res = await this.apiClient.startCore();
+          if (res.code === 0 && res.data.started) {
+            this._panels.chat?.addSystemMessage('[系统] Core 已启动');
+          }
+        } catch (err) {
+          alert('启动失败: ' + (err.message || String(err)));
+        }
+      });
+    }
+
+    // 停止 Core 按钮
+    const stopCoreBtn = document.getElementById('btn-stop-core');
+    if (stopCoreBtn) {
+      stopCoreBtn.addEventListener('click', async () => {
+        if (!confirm('确定要停止 Core 吗？不会清除数据，可以随时重新启动。')) return;
+        try {
+          const res = await this.apiClient.stopCore();
+          if (res.code === 0 && res.data.stopped) {
+            this._panels.chat?.addSystemMessage('[系统] Core 已停止');
+          }
+        } catch (err) {
+          alert('停止失败: ' + (err.message || String(err)));
+        }
+      });
+    }
+
+    // 自动停止 tick 输入框
+    const autoStopInput = document.getElementById('input-auto-stop-tick');
+    if (autoStopInput) {
+      autoStopInput.addEventListener('change', async () => {
+        const value = Math.max(0, parseInt(autoStopInput.value, 10) || 0);
+        autoStopInput.value = value;
+        try {
+          await this.apiClient.updateConfig({ autoStopAfterTick: value });
+        } catch (err) {
+          console.warn('更新自动停止配置失败:', err);
+        }
+      });
+    }
+
+    // 重置压力覆盖按钮
+    const resetKappasBtn = document.getElementById('btn-reset-kappas');
+    if (resetKappasBtn) {
+      resetKappasBtn.addEventListener('click', async () => {
+        if (!confirm('确定重置所有压力值为自动计算吗？')) return;
+        try {
+          const resetPatch = { p1: null, p2: null, p3: null, p4: null, p5: null, p6: null, p7: null, p8: null };
+          const res = await this.apiClient.updatePressureOverrides(resetPatch);
+          if (res && res.code === 0) {
+            await this._panels.pressure?.fetchOverrides(this.apiClient);
+          }
+        } catch (err) {
+          console.warn('重置压力覆盖失败:', err);
+        }
+      });
+    }
+  }
+
+  async _loadConfigToSettings() {
+    try {
+      const res = await this.apiClient.getConfig();
+      if (res.code === 0 && res.data) {
+        // 同步 proactive 开关
+        const proactiveCheckbox = document.getElementById('setting-proactive');
+        if (proactiveCheckbox) {
+          proactiveCheckbox.checked = res.data.proactiveEnabled === true;
+          proactiveCheckbox.addEventListener('change', async () => {
+            try {
+              await this.apiClient.updateConfig({ proactiveEnabled: proactiveCheckbox.checked });
+            } catch (err) {
+              console.warn('更新 proactive 配置失败:', err);
+            }
+          });
+        }
+        // 同步 autoStopAfterTick
+        const autoStopInput = document.getElementById('input-auto-stop-tick');
+        if (autoStopInput && res.data.autoStopAfterTick != null) {
+          autoStopInput.value = res.data.autoStopAfterTick;
+        }
+      }
+    } catch (err) {
+      console.warn('加载配置失败:', err);
+    }
   }
 
   async resetSession() {
@@ -72,6 +165,8 @@ class NovaDashboard {
         this._panels.logs.clear();
         // 重连 WS（使用新 userId）
         this.reconnectWS();
+        // 重新加载压力覆盖（reset 会重建 runtime）
+        setTimeout(() => this._panels.pressure?.fetchOverrides(this.apiClient), 1000);
       } else {
         alert('重置失败: ' + (res.message || '未知错误'));
       }
@@ -163,6 +258,14 @@ class NovaDashboard {
     this.wsClient.on('status_update', (msg) => {
       this._panels.status.update(msg.data);
       this.updateTopbarStatus(msg.data);
+      this._updateCoreButtonStates(msg.data);
+    });
+
+    this.wsClient.on('tick_trace', (msg) => {
+      // 将实时 trace 插入已有列表的最前面
+      if (msg.data && this._panels.traces) {
+        this._panels.traces.prependTrace(msg.data);
+      }
     });
 
     this.wsClient.on('error', (msg) => {
@@ -187,6 +290,13 @@ class NovaDashboard {
     }
   }
 
+  _updateCoreButtonStates(status) {
+    const startBtn = document.getElementById('btn-start-core');
+    const stopBtn = document.getElementById('btn-stop-core');
+    if (startBtn) startBtn.disabled = status.online;
+    if (stopBtn) stopBtn.disabled = !status.online;
+  }
+
   // ── 轮询 ────────────────────────────────────────────────────────────────
 
   startPolling() {
@@ -202,6 +312,7 @@ class NovaDashboard {
       if (statusRes.code === 0) {
         this._panels.status.update(statusRes.data);
         this.updateTopbarStatus(statusRes.data);
+        this._updateCoreButtonStates(statusRes.data);
       }
 
       const pressureRes = await this.apiClient.getPressure(200);
@@ -214,9 +325,16 @@ class NovaDashboard {
         this._panels.traces.update(tracesRes.data);
       }
 
-      const actionsRes = await this.apiClient.getActions(100);
-      if (actionsRes.code === 0) {
-        this._panels.actions.update(actionsRes.data);
+      // Task 4: 使用新 trace API 获取动作追溯
+      const actionTracesRes = await this.apiClient.getActionTraces(100);
+      if (actionTracesRes.code === 0) {
+        this._panels.actions.update(actionTracesRes.data);
+      }
+
+      // Task 4: 获取 deliberation 摘要
+      const delibRes = await this.apiClient.getDeliberationTraces(50);
+      if (delibRes.code === 0 && delibRes.data) {
+        this._renderDeliberations(delibRes.data);
       }
 
       // 系统性能
@@ -225,12 +343,69 @@ class NovaDashboard {
         this._panels.status.updateSystem(sysRes.data);
       }
 
+      // Task 3: 自动停止倒计时
+      try {
+        const autoStopRes = await this.apiClient.getAutoStop();
+        if (autoStopRes.code === 0) {
+          const d = autoStopRes.data;
+          const statusEl = document.getElementById('auto-stop-status');
+          if (statusEl) {
+            if (d.autoStopAfterTick > 0 && d.currentTick > 0) {
+              statusEl.textContent = `(${d.remaining} tick 后停止)`;
+            } else if (d.autoStopAfterTick > 0 && d.currentTick === 0) {
+              statusEl.textContent = '(等待启动…)';
+            } else {
+              statusEl.textContent = '';
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      // 定期刷新压力覆盖状态（频率低，每 30s 一次）
+      if (this._pollCount == null) this._pollCount = 0;
+      this._pollCount++;
+      if (this._pollCount % 6 === 0) {
+        await this._panels.pressure?.fetchOverrides(this.apiClient);
+      }
+
       if (this._panels.logs) {
         this._panels.logs.fetch();
       }
     } catch (err) {
       console.warn('轮询失败:', err);
     }
+  }
+
+  _renderDeliberations(data) {
+    const container = document.getElementById('deliberation-list');
+    if (!container) return;
+    let html = '';
+    for (const d of data.slice(0, 20)) {
+      const actionOrSilence = d.actionSummary ?? d.silenceSummary ?? '—';
+      const actionClass = d.actionSummary ? 'delib-action' : 'delib-silence';
+      const memoryTag = d.memoryWritten ? ' <span class="delib-memory">M</span>' : '';
+      const moodTag = d.selfMoodBefore != null && d.selfMoodAfter != null
+        ? ` <span class="delib-mood">${d.selfMoodBefore.toFixed(2)}→${d.selfMoodAfter.toFixed(2)}</span>`
+        : '';
+      const afterward = d.afterward ? ` [${d.afterward}]` : '';
+
+      html += `<div class="deliberation-item">`;
+      html += `<span class="delib-tick">#${d.tick}</span>`;
+      html += `<span class="${actionClass}">${this._escHtml(actionOrSilence)}</span>`;
+      html += `${memoryTag}${moodTag}${afterward}`;
+      html += `</div>`;
+    }
+    if (html === '') {
+      html = '<div style="padding:20px;text-align:center;color:var(--text-muted)">暂无审议记录</div>';
+    }
+    container.innerHTML = html;
+  }
+
+  _escHtml(s) {
+    if (!s) return '';
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
   }
 
   // ── 用户身份 ────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ import type { WorldModel } from '../world/model';
 import type { NovaWorldRepository } from '../world/repository';
 import type { NovaEventBuffer } from './event-buffer';
 import type { ActionQueue } from '../act/action-queue';
-import type { TickClock } from './tick-clock';
+import type { TickClock, SilencePenalty } from './tick-clock';
 import type { ModeState } from '../engine/mode-fsm';
 import { markDirected, markAnyEvent } from '../engine/mode-fsm';
 import type { VoiceSelectionResult } from '../voices/selection';
@@ -76,6 +76,20 @@ export interface EvolveState {
 
   // 执行 evolve tick 的核心函数（由外部注入以打破循环依赖）
   evolveTickFn: (state: EvolveState) => Promise<boolean>;
+
+  // ── 用户活动追踪（Task 6: 静默惩罚）───────────────────────────────────────
+  /** 用户活动状态，用于动态延长 tick 间隔。 */
+  userActivity?: {
+    lastUserInputMs: number;
+    lastNovaProactiveMs: number;
+    consecutiveUnansweredProactive: number;
+  };
+
+  // ── 自动停止（Task 3）─────────────────────────────────────────────────────
+  /** 自动停止是否已触发。 */
+  autoStopTriggered?: boolean;
+  /** 自动停止回调（EVOLVE loop 退出时调用）。 */
+  onAutoStop?: () => void;
 }
 
 export interface ActionRecord {
@@ -282,9 +296,41 @@ async function runEvolveLoop(
       // 使用最近压力快照中的 api 用于间隔计算
       const actualApi = state.pressureRef.current?.api ?? 0.5;
 
-      // 计算自适应间隔
+      // 静默检测（Task 6）
+      const nowForPenalty = Date.now();
+      const userSilenceSeconds = state.userActivity?.lastUserInputMs
+        ? (nowForPenalty - state.userActivity.lastUserInputMs) / 1000
+        : 0;
+      const unansweredCount = state.userActivity?.consecutiveUnansweredProactive ?? 0;
+      const penalty: SilencePenalty = { userSilenceSeconds, unansweredProactiveCount: unansweredCount };
+
+      // 计算自适应间隔（带静默惩罚）
       const mode = state.modeState.current;
-      const adaptiveInterval = state.clock.computeInterval(actualApi, mode);
+      const adaptiveInterval = state.clock.computeIntervalWithPenalty(actualApi, mode, penalty, {
+        silencePenaltyStartSeconds: state.config.silencePenaltyStartSeconds,
+        silenceMaxMultiplier: state.config.silenceMaxMultiplier,
+        silenceUnansweredProactiveThreshold: state.config.silenceUnansweredProactiveThreshold,
+      });
+
+      // 极长时间静默 → 强制 dormant（Task 6.5）
+      const userSilenceMinutes = userSilenceSeconds / 60;
+      if (userSilenceMinutes > 30 && state.modeState.current !== 'dormant' && state.modeState.current !== 'wakeup') {
+        state.modeState.current = 'dormant';
+        state.modeState.ticksInMode = 0;
+        state.modeState.enteredModeMs = Date.now();
+        logger.info('Nova entered dormant mode due to prolonged user silence', {
+          userSilenceMinutes: userSilenceMinutes.toFixed(1),
+        });
+      }
+
+      // 自动停止检查（Task 3）
+      const autoStopAt = state.config.autoStopAfterTick;
+      if (autoStopAt && autoStopAt > 0 && state.clock.tick >= autoStopAt) {
+        logger.info(`Nova auto-stop triggered at tick ${state.clock.tick} (limit: ${autoStopAt})`);
+        state.autoStopTriggered = true;
+        state.onAutoStop?.();
+        break;
+      }
 
       // 退避乘数
       const backoffMult = Math.min(16, Math.pow(2, consecutiveErrors));

@@ -345,13 +345,14 @@ async function executeSubcycle(
   if (lastEventMs) {
     const idleMs = Date.now() - lastEventMs;
     if (idleMs > 30 * 60 * 1000) {
-      logger.debug('Nova subcycle terminated: channel idle', { targetId, idleMs });
+      logger.info('Nova subcycle dropped: channel idle > 30min', { targetId, idleMs: Math.round(idleMs / 60000) + 'min', lastEventMs, channelId: channel?.id });
       return 'resting';
     }
   }
 
   // 标记执行
   ctx.queue.markExecuting(item.id, Date.now());
+  logger.info('Nova subcycle executing action', { queueId: item.id, actionType: candidate.action, targetId, kind: item.kind, hasChannel: channel != null });
 
   // 执行（LLM 生成 + 发送）
   let sendResult: SendResult;

@@ -1,5 +1,5 @@
 /**
- * ActionsPanel — 动作与沉默时间线。
+ * ActionsPanel — 动作时间线，对接新 Trace API (NovaActionTrace)。
  */
 class ActionsPanel {
   constructor(container) {
@@ -20,30 +20,40 @@ class ActionsPanel {
     let html = '';
     const items = this.actions.slice(0, 50);
 
-    for (const action of items) {
-      const time = new Date(action.createdMs).toLocaleTimeString();
-      const actionType = action.actionType || 'unknown';
-      let dotClass = 'silence';
-      let desc = actionType;
+    for (const trace of items) {
+      const time = new Date(trace.createdMs).toLocaleTimeString();
+      const actionType = trace.actionType || 'unknown';
 
-      if (actionType === 'send_text') {
-        dotClass = 'send_text';
-        desc = `发送 → ${this._shortTarget(action.targetId)}`;
-      } else if (actionType === 'proactive_enqueued') {
-        dotClass = 'proactive';
-        desc = '主动消息入队';
-      } else if (actionType === 'silence' || actionType === 'observe' || actionType === 'cool_down' || actionType === 'wait_reply') {
-        dotClass = 'silence';
-        desc = `${actionType} → ${this._shortTarget(action.targetId)}`;
-      }
+      let dotClass = 'silence';
+      if (trace.status === 'success') dotClass = 'send_text';
+      else if (trace.status === 'failed') dotClass = 'silence';
+      else if (actionType === 'proactive' || actionType === 'proactive_enqueued') dotClass = 'proactive';
+
+      let desc = `${actionType} → ${this._shortTarget(trace.targetId)}`;
+      if (trace.voice) desc += ` [${trace.voice}]`;
 
       html += `<div class="action-item">`;
       html += `<div class="action-dot ${dotClass}"></div>`;
       html += `<div class="action-time">${time}</div>`;
       html += `<div class="action-desc">`;
       html += `<div>${this._esc(desc)}</div>`;
-      if (action.text) {
-        html += `<div class="action-text-preview">${this._esc(action.text.slice(0, 80))}${action.text.length > 80 ? '…' : ''}</div>`;
+      if (trace.text) {
+        const preview = trace.text.length > 80 ? trace.text.slice(0, 80) + '…' : trace.text;
+        html += `<div class="action-text-preview">${this._esc(preview)}</div>`;
+      }
+      if (trace.reasoning) {
+        const reasonPreview = trace.reasoning.length > 100 ? trace.reasoning.slice(0, 100) + '…' : trace.reasoning;
+        html += `<div class="action-reason">💭 ${this._esc(reasonPreview)}</div>`;
+      }
+      if (trace.engagementOutcome) {
+        html += `<div class="action-outcome">结果: ${this._esc(trace.engagementOutcome)}</div>`;
+      }
+      if (trace.llmStateWritebackSummary) {
+        const s = trace.llmStateWritebackSummary;
+        html += `<div class="action-writeback">写回: +${s.acceptedCount}/-${s.rejectedCount}</div>`;
+      }
+      if (trace.error) {
+        html += `<div class="action-outcome" style="color:var(--danger)">错误: ${this._esc(trace.error)}</div>`;
       }
       html += `</div></div>`;
     }

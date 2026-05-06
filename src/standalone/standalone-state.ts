@@ -6,6 +6,7 @@ import type { ActExecutor } from '../act/act-loop';
 import { NovaRuntime, type NovaRuntimeStatus } from '../core/runtime';
 import type { NovaRuntimeConfig } from '../core/types';
 import type { NovaStandaloneConfig } from './web-types';
+import { qqIdFromNodeId } from '../world/constants';
 
 const DEFAULT_STANDALONE_CONFIG_FILENAME = 'nova-standalone-config.json';
 
@@ -39,6 +40,9 @@ function defaultStandaloneConfig(dbPath: string): NovaStandaloneConfig {
     enablePreSendGuardrails: false,
     auditAlgorithmicGates: true,
     port: 3721,
+    autoStopAfterTick: 200,
+    enableScheduledActions: true,
+    proactiveWhitelistQQ: ['*'],
   };
 }
 
@@ -168,6 +172,31 @@ export class NovaStandaloneState {
     }
   }
 
+  /** 停止 Core（不清理文件，保留 SQLite 数据和日志）。 */
+  async stopCore(): Promise<void> {
+    if (!this.runtime?.isRunning) return;
+    await this.stop();
+  }
+
+  /** 启动 Core（不清理文件，复用现有 DB 和日志）。 */
+  async startCore(): Promise<void> {
+    if (this.runtime?.isRunning) return;
+
+    // 确保 logger 存在（不调用 cleanupFiles）
+    if (!this.logger) {
+      const logDir = path.join(path.dirname(this.configPath), 'logs');
+      this.logger = new NovaFileLogger(logDir);
+    }
+    this.logger.info(`Nova Core starting... sessionUser=${this.sessionUserId}`);
+
+    await this.bootRuntime();
+  }
+
+  /** 获取当前配置的深拷贝。 */
+  getConfig(): NovaStandaloneConfig {
+    return { ...this.config, decisionAgent: { ...this.config.decisionAgent } };
+  }
+
   updateConfig(patch: Partial<NovaStandaloneConfig>): void {
     this.config = { ...this.config, ...patch };
     try {
@@ -218,12 +247,19 @@ export class NovaStandaloneState {
 
   private toRuntimeConfig(): NovaRuntimeConfig {
     const c = this.config;
+    // 主 LLM 与决策 LLM 互相 fallback：配了其中一个就能跑通全链路
+    const mainBaseUrl = c.llmBaseUrl || c.decisionAgent.baseUrl;
+    const mainApiKey = c.llmApiKey || c.decisionAgent.apiKey;
+    const mainModel = c.llmModel || c.decisionAgent.model;
+    const agentBaseUrl = c.decisionAgent.baseUrl || c.llmBaseUrl;
+    const agentApiKey = c.decisionAgent.apiKey || c.llmApiKey;
+    const agentModel = c.decisionAgent.model || c.llmModel;
     return {
       enabled: c.enabled,
       debug: c.debug,
-      llmBaseUrl: c.llmBaseUrl,
-      llmApiKey: c.llmApiKey,
-      llmModel: c.llmModel,
+      llmBaseUrl: mainBaseUrl,
+      llmApiKey: mainApiKey,
+      llmModel: mainModel,
       replyInGroupOnlyWhenMentioned: true,
       enablePrivateChat: c.enablePrivateChat,
       enableGroupChat: false,
@@ -238,9 +274,11 @@ export class NovaStandaloneState {
       globalRateLimitPerMinute: 20,
       channelRateLimitPerMinute: 10,
       groupRateLimitPerMinute: 4,
-      enableScheduledActions: false,
+      enableScheduledActions: c.enableScheduledActions ?? false,
       proactiveEnabled: c.proactiveEnabled,
-      proactiveWhitelistQQ: [],
+      proactiveWhitelistQQ: c.proactiveWhitelistQQ && c.proactiveWhitelistQQ.length > 0
+        ? c.proactiveWhitelistQQ
+        : [qqIdFromNodeId(this.sessionUserId)],
       iausScoringMode: c.iausScoringMode,
       minProactiveUtility: 0.05,
       groupMinProactiveUtility: 0.08,
@@ -252,10 +290,17 @@ export class NovaStandaloneState {
       userFloodMessageLimit: 8,
       consecutiveSendFailureLimit: 5,
       gatewayMode: c.gatewayMode,
-      decisionAgent: { ...c.decisionAgent },
+      decisionAgent: {
+        ...c.decisionAgent,
+        baseUrl: agentBaseUrl,
+        apiKey: agentApiKey,
+        model: agentModel,
+      },
       decisionGuardrails: c.decisionGuardrails,
       enablePreSendGuardrails: c.enablePreSendGuardrails,
       auditAlgorithmicGates: c.auditAlgorithmicGates,
+      pressureValueOverrides: c.pressureValueOverrides ?? {},
+      autoStopAfterTick: c.autoStopAfterTick ?? 0,
     };
   }
 }

@@ -88,6 +88,21 @@ export interface NovaRuntimeConfig {
    */
   auditAlgorithmicGates: boolean;
 
+  // ── 压力值覆盖 ────────────────────────────────────────────────────────────
+
+  /** 压力值手动覆盖（null 或 undefined 表示使用计算值）。逐个维度覆盖，互不影响。
+   *  覆盖的是原始压力值（非归一化后的 API），直接替换 computeAllPressures 的输出。 */
+  pressureValueOverrides?: {
+    p1?: number | null;
+    p2?: number | null;
+    p3?: number | null;
+    p4?: number | null;
+    p5?: number | null;
+    p6?: number | null;
+    p7?: number | null;
+    p8?: number | null;
+  };
+
   // ── Tick 控制（新增：对齐 Alice TickClock）─────────────────────────────────
 
   /** TickClock dtMin 覆盖（毫秒），默认 1000。 */
@@ -117,6 +132,20 @@ export interface NovaRuntimeConfig {
   switchCostMs?: number;
   /** 陈旧性检查阈值（L2 距离），默认 0.5。 */
   stalenessThreshold?: number;
+
+  // ── 自动停止 ───────────────────────────────────────────────────────────────
+
+  /** 自动停止 tick 数（0 或 undefined 表示不自动停止）。 */
+  autoStopAfterTick?: number;
+
+  // ── 静默惩罚 ───────────────────────────────────────────────────────────────
+
+  /** 用户静默多久后开始延长 tick 间隔（秒），默认 300（5分钟）。 */
+  silencePenaltyStartSeconds?: number;
+  /** 最大静默乘数，默认 10。 */
+  silenceMaxMultiplier?: number;
+  /** 连续多少次无回应 proactive 后触发额外惩罚，默认 3。 */
+  silenceUnansweredProactiveThreshold?: number;
 }
 
 export interface NovaStickerRef {

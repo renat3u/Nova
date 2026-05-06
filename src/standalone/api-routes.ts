@@ -75,6 +75,46 @@ export function createApiRouter(state: NovaStandaloneState): Router {
     }
   });
 
+  // ── Core 启动/停止 ────────────────────────────────────────────────────────
+  router.post('/api/core/start', async (_req: Request, res: Response) => {
+    try {
+      if (state.isRunning) {
+        res.json(ok({ started: false, message: 'Core 已在运行中' }));
+        return;
+      }
+      await state.startCore();
+      res.json(ok({ started: true }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json(err(message));
+    }
+  });
+
+  router.post('/api/core/stop', async (_req: Request, res: Response) => {
+    try {
+      if (!state.isRunning) {
+        res.json(ok({ stopped: false, message: 'Core 未在运行' }));
+        return;
+      }
+      await state.stopCore();
+      res.json(ok({ stopped: true }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json(err(message));
+    }
+  });
+
+  // ── 自动停止状态查询 ──────────────────────────────────────────────────────
+  router.get('/api/core/auto-stop', (_req: Request, res: Response) => {
+    const config = state.getConfig();
+    const runtime = rt();
+    res.json(ok({
+      autoStopAfterTick: config.autoStopAfterTick ?? 0,
+      currentTick: (runtime as any)?.clock?.tick ?? 0,
+      remaining: Math.max(0, (config.autoStopAfterTick ?? 0) - ((runtime as any)?.clock?.tick ?? 0)),
+    }));
+  });
+
   // ── System ───────────────────────────────────────────────────────────────
   router.get('/api/system', (_req: Request, res: Response) => {
     const totalMem = os.totalmem();
@@ -106,6 +146,41 @@ export function createApiRouter(state: NovaStandaloneState): Router {
   router.get('/api/pressure', (req: Request, res: Response) => {
     const limit = readLimit(req.query.limit ?? req.query.n);
     res.json(ok(rt()?.getPressureSnapshots(limit) ?? []));
+  });
+
+  // ── Pressure 值覆盖查询/设置 ──────────────────────────────────────────────
+  router.get('/api/pressure/overrides', (_req: Request, res: Response) => {
+    const runtime = rt();
+    if (!runtime) {
+      res.json(ok({}));
+      return;
+    }
+    const latestSnapshot = runtime.getPressureSnapshots(1)[0];
+    const overrides = runtime.runtimeConfig.pressureValueOverrides ?? {};
+    res.json(ok({
+      p1: { value: latestSnapshot?.p1 ?? 0, overridden: overrides.p1 != null, overrideValue: overrides.p1 ?? null },
+      p2: { value: latestSnapshot?.p2 ?? 0, overridden: overrides.p2 != null, overrideValue: overrides.p2 ?? null },
+      p3: { value: latestSnapshot?.p3 ?? 0, overridden: overrides.p3 != null, overrideValue: overrides.p3 ?? null },
+      p4: { value: latestSnapshot?.p4 ?? 0, overridden: overrides.p4 != null, overrideValue: overrides.p4 ?? null },
+      p5: { value: latestSnapshot?.p5 ?? 0, overridden: overrides.p5 != null, overrideValue: overrides.p5 ?? null },
+      p6: { value: latestSnapshot?.p6 ?? 0, overridden: overrides.p6 != null, overrideValue: overrides.p6 ?? null },
+      p7: { value: latestSnapshot?.p7 ?? 0, overridden: overrides.p7 != null, overrideValue: overrides.p7 ?? null },
+      p8: { value: latestSnapshot?.p8 ?? 0, overridden: overrides.p8 != null, overrideValue: overrides.p8 ?? null },
+    }));
+  });
+
+  router.post('/api/pressure/overrides', (req: Request, res: Response) => {
+    const patch = req.body ?? {};
+    const config = state.getConfig();
+    const current = config.pressureValueOverrides ?? {};
+    const updated: Record<string, number | null> = { ...current };
+    for (const key of ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8']) {
+      if (key in patch) {
+        updated[key] = patch[key]; // null 表示取消覆盖
+      }
+    }
+    state.updateConfig({ pressureValueOverrides: updated });
+    res.json(ok(updated));
   });
 
   // ── Tick traces ──────────────────────────────────────────────────────────

@@ -137,6 +137,13 @@ async function main() {
       bridge.broadcastPressure(snapshots[0] as unknown as PressureSnapshot);
     }
     bridge.broadcastStatus(rt.status);
+
+    // 广播最新 tick trace（Task 4.4: 启用实时 tick_trace 推送）
+    const recentTraces = rt.getTickTraces(1);
+    const latestTrace = recentTraces[0];
+    if (latestTrace) {
+      bridge.broadcastTickTrace(latestTrace);
+    }
   }, 5000);
   broadcastInterval.unref?.();
 

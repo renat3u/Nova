@@ -509,6 +509,16 @@ export function evaluateWhitelistGate(
     });
   }
 
+  // 通配符 * 表示放行全部
+  if (whitelist.includes('*')) return null;
+
+  // 前缀通配符 web:* 表示放行所有 web 用户
+  for (const entry of whitelist) {
+    if (entry.endsWith(':*') && targetQQ?.startsWith(entry.slice(0, -2))) {
+      return null;
+    }
+  }
+
   if (!targetQQ || !whitelist.includes(targetQQ)) {
     return silence('hard', SILENCE_REASONS.PROACTIVE_WHITELIST_DENIED, [], {
       targetId,

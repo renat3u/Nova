@@ -40,4 +40,11 @@ class NovaApiClient {
   async getConfig() { return this._get('/api/config'); }
   async resetSession() { return this._post('/api/session/reset', {}); }
   async updateConfig(patch) { return this._post('/api/config', patch); }
+  async getPressureOverrides() { return this._get('/api/pressure/overrides'); }
+  async updatePressureOverrides(patch) { return this._post('/api/pressure/overrides', patch); }
+  async startCore() { return this._post('/api/core/start', {}); }
+  async stopCore() { return this._post('/api/core/stop', {}); }
+  async getAutoStop() { return this._get('/api/core/auto-stop'); }
+  async post(path, body) { return this._post(path, body); }
+  async getCustom(path, params) { return this._get(path, params); }
 }

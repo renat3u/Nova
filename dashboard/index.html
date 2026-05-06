@@ -33,12 +33,24 @@
         <section class="panel active" id="panel-dashboard">
           <div class="status-bar" id="status-bar"></div>
           <div class="dashboard-toolbar">
+            <button id="btn-start-core" class="btn-success">启动 Core</button>
+            <button id="btn-stop-core" class="btn-danger-outline">停止 Core</button>
+            <span class="toolbar-separator">|</span>
+            <label class="auto-stop-label">
+              <input type="number" id="input-auto-stop-tick" value="200"
+                     min="0" step="10" class="auto-stop-input">
+              tick 后自动停止
+            </label>
+            <span id="auto-stop-status" class="auto-stop-status"></span>
+            <span class="toolbar-separator">|</span>
             <button id="btn-new-session" class="btn-danger-outline">新会话</button>
             <span class="toolbar-hint">删除旧记忆，以全新身份开始</span>
           </div>
           <div class="dashboard-grid">
             <div class="card card-wide" id="card-pressure-params">
-              <h3>压力参数</h3>
+              <h3>压力参数
+                <button id="btn-reset-kappas" class="btn-text" style="margin-left:8px;font-size:11px" title="重置所有手动覆盖的压力值">重置覆盖</button>
+              </h3>
               <div class="pressure-params" id="pressure-params"></div>
             </div>
             <div class="card card-wide" id="card-pressure-timeline">
@@ -57,6 +69,10 @@
             <div class="card" id="card-actions">
               <h3>动作日志</h3>
               <div class="action-timeline" id="action-timeline"></div>
+            </div>
+            <div class="card" id="card-deliberations">
+              <h3>审议摘要</h3>
+              <div class="deliberation-list" id="deliberation-list"></div>
             </div>
           </div>
         </section>
@@ -131,6 +147,20 @@
               <div class="setting-row">
                 <label for="setting-autoscroll-log">自动滚动日志</label>
                 <input type="checkbox" id="setting-autoscroll-log" checked>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <h4>主动行为</h4>
+              <div class="setting-row">
+                <label for="setting-proactive">启用主动消息</label>
+                <input type="checkbox" id="setting-proactive">
+              </div>
+              <div class="setting-row">
+                <span class="setting-hint">
+                  开启后，Nova 可能在无新消息时主动联系你。
+                  在 standalone 模式下建议关闭，避免无意义的 LLM 调用。
+                </span>
               </div>
             </div>
 

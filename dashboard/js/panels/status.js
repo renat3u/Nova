@@ -12,6 +12,7 @@ class StatusPanel {
       <div class="status-card"><div class="value" id="stat-tick">—</div><div class="label">Tick</div></div>
       <div class="status-card"><div class="value" id="stat-api">—</div><div class="label">API</div></div>
       <div class="status-card"><div class="value" id="stat-queue">0</div><div class="label">队列</div></div>
+      <div class="status-card"><div class="value" id="stat-tick-interval">—</div><div class="label">Tick间隔</div></div>
       <div class="status-card"><div class="value" id="stat-cpu">—</div><div class="label">CPU 负载</div></div>
       <div class="status-card"><div class="value" id="stat-mem">—</div><div class="label">内存</div></div>
       <div class="status-card"><div class="value" id="stat-heap">—</div><div class="label">堆内存</div></div>
@@ -46,6 +47,20 @@ class StatusPanel {
     }
 
     setVal('stat-queue', status.queue?.pending ?? '0');
+
+    // Task 6.7: 显示 tick 间隔（如果有）
+    if (status.tickIntervalMs != null) {
+      const secs = (status.tickIntervalMs / 1000).toFixed(1);
+      setVal('stat-tick-interval', secs + 's');
+      const intervalEl = document.getElementById('stat-tick-interval');
+      if (intervalEl) {
+        if (status.tickIntervalMs > 60000) intervalEl.style.color = 'var(--warning)';
+        else if (status.tickIntervalMs > 300000) intervalEl.style.color = 'var(--danger)';
+        else intervalEl.style.color = '';
+      }
+    } else {
+      setVal('stat-tick-interval', '—');
+    }
   }
 
   /** 更新系统性能指标 */

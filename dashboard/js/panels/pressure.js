@@ -1,5 +1,5 @@
 /**
- * PressurePanel — 压力参数卡片 + 时序折线图。
+ * PressurePanel — 压力参数卡片 + 时序折线图 + 压力值直接编辑。
  */
 class PressurePanel {
   constructor(paramsContainer, timelineContainer, rangeSelector) {
@@ -9,6 +9,8 @@ class PressurePanel {
     this.timelineChart = null;
     this.snapshots = [];
     this.timeRange = 5 * 60 * 1000;
+    this._editingKey = null;
+    this._overrides = {};
 
     this.initCharts();
     this.initRangeSelector();
@@ -47,8 +49,25 @@ class PressurePanel {
     this.renderTimeline();
   }
 
+  /** 从 API 加载当前压力值和覆盖状态。 */
+  async fetchOverrides(apiClient) {
+    try {
+      const res = await apiClient.getPressureOverrides();
+      if (res.code === 0 && res.data) {
+        this._overrides = res.data;
+        if (this.snapshots.length > 0) {
+          this.renderParams(this.snapshots[0]);
+        }
+      }
+    } catch (e) {
+      console.warn('获取压力覆盖状态失败:', e);
+    }
+  }
+
   renderParams(latest) {
     if (!latest || !this.paramsContainer) return;
+
+    const overrides = this._overrides;
 
     const params = [
       { key: 'p1', name: 'P1', desc: '实在压力', value: latest.p1 ?? 0 },
@@ -69,14 +88,38 @@ class PressurePanel {
       return 'param-high';
     }
 
+    // 可编辑的压力维度
+    const editableKeys = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'];
+
     let html = '';
     for (const p of params) {
-      html += `<div class="param-card">`;
-      html += `<div class="param-name">${p.name} <span style="font-size:9px">${p.desc}</span></div>`;
-      html += `<div class="param-value ${colorClass(p.value)}">${p.value.toFixed(3)}</div>`;
+      const oi = overrides[p.key];
+      const overridden = oi?.overridden === true;
+      const isEditing = this._editingKey === p.key;
+      const canEdit = editableKeys.includes(p.key);
+
+      html += `<div class="param-card${overridden ? ' param-overridden' : ''}" data-param-key="${p.key}">`;
+      html += `<div class="param-name">${p.name} <span class="param-desc-label">${p.desc}</span>${overridden ? ' <span class="param-override-badge">已覆盖</span>' : ''}</div>`;
+
+      if (isEditing && canEdit) {
+        html += `<input type="number" class="param-value-input"
+          id="pressure-input-${p.key}"
+          value="${p.value.toFixed(4)}"
+          step="any"
+          min="0">`;
+        html += `<div class="param-edit-actions">`;
+        html += `<button class="btn-text param-edit-ok" data-key="${p.key}">✓</button>`;
+        html += `<button class="btn-text param-edit-cancel" data-key="${p.key}">✗</button>`;
+        html += `</div>`;
+      } else {
+        html += `<div class="param-value ${colorClass(p.value)}${canEdit ? ' param-value-clickable' : ''}"
+          ${canEdit ? `data-key="${p.key}" title="点击编辑压力值"` : ''}>${p.value.toFixed(3)}</div>`;
+      }
+
       html += `</div>`;
     }
 
+    // Tick 卡（不可编辑）
     html += `<div class="param-card">`;
     html += `<div class="param-name">Tick</div>`;
     html += `<div class="param-value" style="font-size:16px">#${latest.tick ?? '?'}</div>`;
@@ -84,6 +127,90 @@ class PressurePanel {
     html += `</div>`;
 
     this.paramsContainer.innerHTML = html;
+
+    // 绑定事件
+    this._bindEditEvents();
+  }
+
+  _bindEditEvents() {
+    // 点击可编辑的值进入编辑模式
+    this.paramsContainer.querySelectorAll('.param-value-clickable').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const key = el.dataset.key;
+        this._editingKey = key;
+        if (this.snapshots.length > 0) {
+          this.renderParams(this.snapshots[0]);
+        }
+        setTimeout(() => {
+          const input = document.getElementById(`pressure-input-${key}`);
+          if (input) { input.focus(); input.select(); }
+        }, 50);
+      });
+    });
+
+    // 确认编辑
+    this.paramsContainer.querySelectorAll('.param-edit-ok').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const key = btn.dataset.key;
+        const input = document.getElementById(`pressure-input-${key}`);
+        const rawValue = input?.value?.trim();
+
+        let value;
+        if (rawValue === '' || rawValue === undefined || rawValue === 'null') {
+          value = null;
+        } else {
+          value = parseFloat(rawValue);
+          if (isNaN(value) || value < 0) return;
+        }
+
+        try {
+          const patch = {};
+          patch[key] = value;
+          const res = await window.novaApp?.apiClient?.updatePressureOverrides(patch);
+          if (res && res.code === 0) {
+            if (this._overrides[key]) {
+              this._overrides[key].overridden = value != null;
+              this._overrides[key].overrideValue = value;
+            }
+          }
+        } catch (err) {
+          console.warn('更新压力覆盖失败:', err);
+        }
+
+        this._editingKey = null;
+        if (this.snapshots.length > 0) {
+          this.renderParams(this.snapshots[0]);
+        }
+      });
+    });
+
+    // 取消编辑
+    this.paramsContainer.querySelectorAll('.param-edit-cancel').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._editingKey = null;
+        if (this.snapshots.length > 0) {
+          this.renderParams(this.snapshots[0]);
+        }
+      });
+    });
+
+    // 输入框 Enter / Escape
+    this.paramsContainer.querySelectorAll('.param-value-input').forEach((input) => {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const okBtn = input.parentElement?.querySelector('.param-edit-ok');
+          if (okBtn) okBtn.click();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          const cancelBtn = input.parentElement?.querySelector('.param-edit-cancel');
+          if (cancelBtn) cancelBtn.click();
+        }
+      });
+    });
   }
 
   renderTimeline() {
@@ -140,7 +267,7 @@ class PressurePanel {
         axisLine: { lineStyle: { color: 'var(--border)' } },
       },
       yAxis: {
-        type: 'value', min: 0, max: 1,
+        type: 'value',
         axisLabel: { fontSize: 10, color: 'var(--text-muted)' },
         splitLine: { lineStyle: { color: 'var(--border)', type: 'dashed' } },
       },
